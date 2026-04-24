@@ -3,14 +3,15 @@
 The `SuperTrendV1Controller` is a trend-following strategy based on the popular SuperTrend indicator.
 
 ## Overview
-It uses the SuperTrend indicator to determine the current market direction and enters trades when the price is near the SuperTrend line but still moving in the trending direction.
+It follows the direction of the market trend as defined by the SuperTrend indicator, with an additional filter for the distance between the price and the indicator line.
 
 ## Logic
-- **Indicator:** SuperTrend (calculates trend based on ATR and Median Price).
-- **Entry Logic:**
-  - **Long:** Triggered when the SuperTrend signal is bullish (1) AND the price is within a `percentage_threshold` of the SuperTrend line.
-  - **Short:** Triggered when the SuperTrend signal is bearish (-1) AND the price is within a `percentage_threshold` of the SuperTrend line.
-- **Goal:** To enter a trend during a "pullback" to the support/resistance level defined by the SuperTrend line.
+- **Indicator:** SuperTrend, which uses ATR (Average True Range) to calculate potential trend reversals.
+- **Signal Generation:**
+  - **Long Signal:** SuperTrend indicates an uptrend AND the current price is within a `percentage_threshold` distance from the SuperTrend line.
+  - **Short Signal:** SuperTrend indicates a downtrend AND the current price is within a `percentage_threshold` distance from the SuperTrend line.
+- **Percentage Filter:** This filter ensures that the strategy doesn't enter a trade if the price has already moved too far from the trend reversal point.
+- **Execution:** Uses a standard position executor.
 
 ## Best For
-Pure trend-following strategies in trending markets. It helps traders join an existing trend at a more favorable price point by waiting for the price to come close to the indicator's trend line.
+Following strong market trends and entering shortly after a trend reversal has been confirmed.

@@ -1,16 +1,18 @@
 # Bollinger V2 Controller
 
-The `BollingerV2Controller` is an enhanced version of the Bollinger strategy that adds trend filtering to improve signal reliability.
+The `BollingerV2Controller` is a mean-reversion strategy based on the Bollinger Band Percentage (%b) indicator, using TALib for indicator calculation.
 
 ## Overview
-Unlike V1, which trades every touch of the bands, V2 uses moving averages and volatility indicators to ensure that trades are taken in the direction of the broader trend or when volatility conditions are favorable.
+It monitors the price relative to the upper and lower Bollinger Bands and generates signals when the price goes beyond specified thresholds.
 
 ## Logic
-- **Advanced Filtering:** It incorporates "Fast" and "Slow" moving averages (typically EMA) to confirm trend direction.
-- **Trend-Following:**
-  - It generally restricts Longs to bullish trends and Shorts to bearish trends.
-- **Volatility Awareness:** Can monitor Bollinger Band Width to avoid trading during "squeezes" or to target high-volatility expansions.
-- **Execution:** Uses a standard position executor but with more "cautious" entry criteria than V1.
+- **Indicator:** Uses Bollinger Bands calculated via TALib for high performance.
+- **Signal Calculation:**
+  - Calculates Bollinger Band Percentage (`bbp`): `(close - lower_band) / (upper_band - lower_band)`.
+  - Includes a `non_zero_range` utility to prevent division by zero errors during high volatility.
+  - **Long Signal:** When `bbp < bb_long_threshold`.
+  - **Short Signal:** When `bbp > bb_short_threshold`.
+- **Execution:** Uses a standard position executor.
 
 ## Best For
-Trend-following or mean-reversion with a trend filter. It helps avoid "catching a falling knife" in strong trending markets where V1 might produce many losing contrarian signals.
+Mean-reversion trading where high-performance indicator calculation (TALib) is preferred.

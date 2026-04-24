@@ -1,18 +1,18 @@
 # MACD BB V1 Controller
 
-The `MACDBBV1Controller` combines Bollinger Bands with the MACD (Moving Average Convergence Divergence) indicator to create a multi-confirmed entry signal.
+The `MACDBBV1Controller` is a trend-following and mean-reversion strategy that combines Bollinger Bands with the MACD indicator for signal confirmation.
 
 ## Overview
-This controller uses the Bollinger Bands to identify potential reversal zones and the MACD Histogram/Signal to confirm momentum before entering a trade.
+It uses Bollinger Bands to identify price extremes and MACD to confirm that the momentum is shifting in the desired direction before entering a trade.
 
 ## Logic
 - **Indicators:**
-  - Bollinger Bands (%b).
-  - MACD (Fast, Slow, and Signal periods).
-- **Confirmation Logic:**
-  - **Long:** Price is at the lower Bollinger Band AND MACD Histogram is positive AND MACD line is below zero.
-  - **Short:** Price is at the upper Bollinger Band AND MACD Histogram is negative AND MACD line is above zero.
-- **Goal:** To ensure that mean-reversion trades are taken only when there is evidence of momentum shifting back toward the mean.
+  - **Bollinger Bands:** Identifies overbought/oversold conditions.
+  - **MACD (Moving Average Convergence Divergence):** Measures momentum and trend direction.
+- **Signal Confirmation:**
+  - **Long Signal:** Price is near/below the lower Bollinger Band (`bbp < threshold`) AND MACD histogram is positive (`macdh > 0`) AND MACD line is below zero (`macd < 0`).
+  - **Short Signal:** Price is near/above the upper Bollinger Band (`bbp > threshold`) AND MACD histogram is negative (`macdh < 0`) AND MACD line is above zero (`macd > 0`).
+- **Execution:** Uses a standard position executor.
 
 ## Best For
-Traders who find Bollinger Bands alone too "noisy" and want a secondary momentum-based confirmation to avoid entering a reversal trade too early.
+Capturing reversals with momentum confirmation, helping to filter out false signals that might occur in a strongly trending market.
