@@ -138,10 +138,7 @@ class ExecutorService:
 
     async def recover_positions_from_db(self):
         """
-        Recover position holds from database on startup.
-
-        This loads executors that closed with POSITION_HOLD (keep_position=True)
-        and reconstructs the _positions_held tracking from their final state.
+        Recover position holds from the dedicated position_holds table on startup.
         """
         if not self.db_manager:
             return
@@ -151,68 +148,41 @@ class ExecutorService:
                 from database.repositories.executor_repository import ExecutorRepository
                 repo = ExecutorRepository(session)
 
-                position_hold_executors = await repo.get_position_hold_executors()
+                records = await repo.get_active_position_holds()
 
-                for executor_record in position_hold_executors:
-                    # Build position key
-                    controller_id = getattr(executor_record, "controller_id", "main") or "main"
+                for record in records:
+                    controller_id = record.controller_id or "main"
                     position_key = self._get_position_key(
-                        executor_record.account_name,
-                        executor_record.connector_name,
-                        executor_record.trading_pair,
+                        record.account_name,
+                        record.connector_name,
+                        record.trading_pair,
                         controller_id
                     )
 
-                    # Initialize position if needed
-                    if position_key not in self._positions_held:
-                        self._positions_held[position_key] = PositionHold(
-                            trading_pair=executor_record.trading_pair,
-                            connector_name=executor_record.connector_name,
-                            account_name=executor_record.account_name,
-                            controller_id=controller_id,
-                        )
-
-                    position = self._positions_held[position_key]
-
-                    # Try to extract fill data from final_state
-                    if executor_record.final_state:
+                    executor_ids = []
+                    if record.executor_ids:
                         try:
-                            final_state = json.loads(executor_record.final_state)
+                            executor_ids = json.loads(record.executor_ids)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
 
-                            # Process held_position_orders (most accurate source)
-                            held_orders = final_state.get("held_position_orders", [])
-                            if held_orders:
-                                buy_filled_base = Decimal("0")
-                                buy_filled_quote = Decimal("0")
-                                sell_filled_base = Decimal("0")
-                                sell_filled_quote = Decimal("0")
-
-                                for order in held_orders:
-                                    if isinstance(order, dict):
-                                        trade_type = order.get("trade_type", "BUY")
-                                        exec_base = Decimal(str(order.get("executed_amount_base", 0)))
-                                        exec_quote = Decimal(str(order.get("executed_amount_quote", 0)))
-
-                                        if trade_type == "BUY":
-                                            buy_filled_base += exec_base
-                                            buy_filled_quote += exec_quote
-                                        else:
-                                            sell_filled_base += exec_base
-                                            sell_filled_quote += exec_quote
-
-                                # Add fills using proper method
-                                if buy_filled_base > 0:
-                                    position.add_fill("BUY", buy_filled_base, buy_filled_quote, executor_record.executor_id)
-                                if sell_filled_base > 0:
-                                    position.add_fill("SELL", sell_filled_base, sell_filled_quote, executor_record.executor_id)
-
-                                logger.debug(
-                                    f"Recovered position from {executor_record.executor_id}: "
-                                    f"buy={buy_filled_base} base, sell={sell_filled_base} base"
-                                )
-
-                        except (json.JSONDecodeError, TypeError) as e:
-                            logger.debug(f"Could not parse final_state for {executor_record.executor_id}: {e}")
+                    position = PositionHold(
+                        trading_pair=record.trading_pair,
+                        connector_name=record.connector_name,
+                        account_name=record.account_name,
+                        controller_id=controller_id,
+                        buy_amount_base=Decimal(str(record.buy_amount_base or 0)),
+                        buy_amount_quote=Decimal(str(record.buy_amount_quote or 0)),
+                        sell_amount_base=Decimal(str(record.sell_amount_base or 0)),
+                        sell_amount_quote=Decimal(str(record.sell_amount_quote or 0)),
+                        realized_pnl_quote=Decimal(str(record.realized_pnl_quote or 0)),
+                        cum_fees_quote=Decimal(str(record.cum_fees_quote or 0)),
+                        executor_ids=executor_ids,
+                        last_updated=record.last_updated,
+                    )
+                    # Settle any matched volume from legacy unsettled data
+                    position._calculate_realized_pnl()
+                    self._positions_held[position_key] = position
 
                 if self._positions_held:
                     logger.info(f"Recovered {len(self._positions_held)} position holds from database")
@@ -352,13 +322,13 @@ class ExecutorService:
         # Extract connector and trading pair from config
         connector_name = executor_config.get("connector_name")
         trading_pair = executor_config.get("trading_pair")
-        if not connector_name:
-            raise HTTPException(status_code=400, detail="connector_name is required in executor_config")
-        if not trading_pair:
-            raise HTTPException(status_code=400, detail="trading_pair is required in executor_config")
 
         # Ensure connector and market are ready
-        await trading_interface.add_market(connector_name, trading_pair)
+        if connector_name:
+            if trading_pair:
+                await trading_interface.add_market(connector_name, trading_pair)
+            else:
+                await trading_interface.ensure_connector(connector_name)
 
         # Set timestamp if not provided (required for time-based features like time_limit)
         if "timestamp" not in executor_config or executor_config["timestamp"] is None:
@@ -650,6 +620,12 @@ class ExecutorService:
         result["close_type"] = executor.close_type.name if executor.close_type else None
         result["is_active"] = not executor.is_closed
 
+        # Add side from executor_info (it's a property, not serialized by model_dump)
+        side = executor_info.side
+        if side is not None:
+            # Convert TradeType enum or int to string
+            result["side"] = side.name if hasattr(side, 'name') else str(side)
+
         # For grid executors, filter out heavy fields from custom_info
         if executor_type == "grid_executor" and result.get("custom_info"):
             heavy_fields = {"levels_by_state", "filled_orders", "failed_orders", "canceled_orders"}
@@ -663,6 +639,18 @@ class ExecutorService:
 
     def _format_db_record(self, record) -> Dict[str, Any]:
         """Format a database ExecutorRecord for API response."""
+        # Parse error_log from DB for completed executors
+        error_count = 0
+        last_error = None
+        if record.error_log:
+            try:
+                errors = json.loads(record.error_log)
+                error_count = len(errors)
+                if errors:
+                    last_error = errors[-1].get("message")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         return {
             "executor_id": record.executor_id,
             "executor_type": record.executor_type,
@@ -685,6 +673,8 @@ class ExecutorService:
             "filled_amount_quote": float(record.filled_amount_quote) if record.filled_amount_quote else 0.0,
             "config": json.loads(record.config) if record.config else None,
             "custom_info": json.loads(record.final_state) if record.final_state else None,
+            "error_count": error_count,
+            "last_error": last_error,
         }
 
     def get_summary(self) -> Dict[str, Any]:
@@ -806,16 +796,48 @@ class ExecutorService:
         positions = self.get_positions_held(controller_id=controller_id)
         report["active_positions"] = len(positions)
 
+        # Accumulate fees from position holds (already paid, reduce PnL)
+        position_hold_fees = sum(float(p.cum_fees_quote) for p in positions)
+
         if market_data_service:
+            # First pass: try oracle for each position, collect misses grouped by connector
+            missing_by_connector: Dict[str, List[tuple]] = {}  # connector_key -> [(position, trading_pair)]
             for p in positions:
                 parts = p.trading_pair.split("-")
-                if len(parts) == 2:
-                    base, quote = parts
-                    rate = market_data_service.get_rate(base, quote)
-                    if rate is not None:
-                        unrealized_pnl += float(p.get_unrealized_pnl(rate))
+                if len(parts) != 2:
+                    continue
+                base, quote = parts
+                rate = market_data_service.get_rate(base, quote)
+                if rate is not None:
+                    unrealized_pnl += float(p.get_unrealized_pnl(rate))
+                else:
+                    # Group by connector+account for batch fallback
+                    connector_key = f"{p.connector_name}|{p.account_name}"
+                    missing_by_connector.setdefault(connector_key, []).append((p, p.trading_pair))
+
+            # Second pass: batch-fetch missing prices from the actual connectors
+            for connector_key, items in missing_by_connector.items():
+                connector_name, account_name = connector_key.split("|", 1)
+                trading_pairs = [tp for _, tp in items]
+                try:
+                    prices = await market_data_service.get_prices(
+                        connector_name=connector_name,
+                        trading_pairs=trading_pairs,
+                        account_name=account_name,
+                    )
+                    if isinstance(prices, dict) and "error" not in prices:
+                        for pos, tp in items:
+                            price = prices.get(tp)
+                            if price is not None and price > 0:
+                                unrealized_pnl += float(pos.get_unrealized_pnl(Decimal(str(price))))
+                except Exception as e:
+                    logger.warning(f"Fallback price fetch failed for {connector_name}: {e}")
+
+        # Subtract position hold fees from unrealized PnL
+        unrealized_pnl -= position_hold_fees
 
         report["unrealized_pnl_quote"] = round(unrealized_pnl, 8)
+        report["position_hold_fees_quote"] = round(position_hold_fees, 8)
         report["global_pnl_quote"] = round(report["pnl_total_quote"] + unrealized_pnl, 8)
 
         return report
@@ -900,6 +922,23 @@ class ExecutorService:
                 except Exception:
                     final_state_json = None
 
+            # Capture error logs before persisting
+            error_log_json = None
+            error_count = self._log_capture.get_error_count(executor_id)
+            if error_count > 0:
+                try:
+                    error_entries = self._log_capture.get_logs(executor_id, level="ERROR")
+                    error_log_json = json.dumps([
+                        {
+                            "timestamp": entry.get("timestamp"),
+                            "message": entry.get("message"),
+                            "exc_info": entry.get("exc_info"),
+                        }
+                        for entry in error_entries
+                    ])
+                except Exception as e:
+                    logger.debug(f"Failed to serialize error logs for {executor_id}: {e}")
+
             async with self.db_manager.get_session_context() as session:
                 from database.repositories.executor_repository import ExecutorRepository
                 repo = ExecutorRepository(session)
@@ -912,7 +951,8 @@ class ExecutorService:
                     net_pnl_pct=net_pnl_pct,
                     cum_fees_quote=cum_fees_quote,
                     filled_amount_quote=filled_amount_quote,
-                    final_state=final_state_json
+                    final_state=final_state_json,
+                    error_log=error_log_json
                 )
 
             logger.debug(f"Persisted executor {executor_id} completion to database")
@@ -1000,17 +1040,26 @@ class ExecutorService:
             # Check for held_position_orders (used by grid_executor, position_executor, etc.)
             held_orders = custom_info.get("held_position_orders", []) if custom_info else []
 
+            # Extract cumulative fees from the executor
+            executor_fees = Decimal("0")
+            try:
+                executor_fees = Decimal(str(executor.cum_fees_quote or 0))
+            except Exception:
+                pass
+
             if held_orders:
                 buy_filled_base = Decimal("0")
                 buy_filled_quote = Decimal("0")
                 sell_filled_base = Decimal("0")
                 sell_filled_quote = Decimal("0")
+                orders_fees = Decimal("0")
 
                 for order in held_orders:
                     if isinstance(order, dict):
                         trade_type = order.get("trade_type", "BUY")
                         exec_base = Decimal(str(order.get("executed_amount_base", 0)))
                         exec_quote = Decimal(str(order.get("executed_amount_quote", 0)))
+                        orders_fees += Decimal(str(order.get("cumulative_fee_paid_quote", 0)))
 
                         if trade_type == "BUY":
                             buy_filled_base += exec_base
@@ -1019,20 +1068,28 @@ class ExecutorService:
                             sell_filled_base += exec_base
                             sell_filled_quote += exec_quote
 
+                # Use order-level fees if available, otherwise fall back to executor-level
+                fees = orders_fees if orders_fees > 0 else executor_fees
+
                 # Add buy and sell fills separately
                 if buy_filled_base > 0:
-                    position.add_fill("BUY", buy_filled_base, buy_filled_quote, executor_id)
+                    # Split fees proportionally between buy and sell by quote volume
+                    total_quote = buy_filled_quote + sell_filled_quote
+                    buy_fee_share = fees * (buy_filled_quote / total_quote) if total_quote > 0 else fees
+                    position.add_fill("BUY", buy_filled_base, buy_filled_quote, executor_id, fees_quote=buy_fee_share)
                 if sell_filled_base > 0:
-                    position.add_fill("SELL", sell_filled_base, sell_filled_quote, executor_id)
+                    total_quote = buy_filled_quote + sell_filled_quote
+                    sell_fee_share = fees * (sell_filled_quote / total_quote) if total_quote > 0 else fees
+                    position.add_fill("SELL", sell_filled_base, sell_filled_quote, executor_id, fees_quote=sell_fee_share)
 
                 logger.info(
                     f"Aggregated executor {executor_id} to position {position_key}: "
-                    f"buy={buy_filled_base} base, sell={sell_filled_base} base"
+                    f"buy={buy_filled_base} base, sell={sell_filled_base} base, fees={fees} quote"
                 )
 
             elif filled_amount_base > 0:
                 # For non-grid executors with a single side
-                position.add_fill(side, filled_amount_base, filled_amount_quote, executor_id)
+                position.add_fill(side, filled_amount_base, filled_amount_quote, executor_id, fees_quote=executor_fees)
                 logger.info(
                     f"Aggregated executor {executor_id} to position {position_key}: "
                     f"{side} {filled_amount_base} base @ {filled_amount_quote} quote"
@@ -1040,8 +1097,35 @@ class ExecutorService:
             else:
                 logger.debug(f"Executor {executor_id} has no filled amounts to aggregate")
 
+            # Persist position hold to the dedicated table
+            await self._persist_position_hold(position)
+
         except Exception as e:
             logger.error(f"Error aggregating position for executor {executor_id}: {e}", exc_info=True)
+
+    async def _persist_position_hold(self, position: PositionHold):
+        """Persist a position hold to the dedicated position_holds table."""
+        if not self.db_manager:
+            return
+        try:
+            async with self.db_manager.get_session_context() as session:
+                from database.repositories.executor_repository import ExecutorRepository
+                repo = ExecutorRepository(session)
+                await repo.upsert_position_hold(
+                    account_name=position.account_name,
+                    connector_name=position.connector_name,
+                    trading_pair=position.trading_pair,
+                    controller_id=position.controller_id,
+                    buy_amount_base=position.buy_amount_base,
+                    buy_amount_quote=position.buy_amount_quote,
+                    sell_amount_base=position.sell_amount_base,
+                    sell_amount_quote=position.sell_amount_quote,
+                    realized_pnl_quote=position.realized_pnl_quote,
+                    cum_fees_quote=position.cum_fees_quote,
+                    executor_ids=position.executor_ids,
+                )
+        except Exception as e:
+            logger.error(f"Error persisting position hold: {e}", exc_info=True)
 
     def get_positions_held(
         self,
@@ -1125,21 +1209,21 @@ class ExecutorService:
         position_key = self._get_position_key(account_name, connector_name, trading_pair, controller_id)
         if position_key in self._positions_held:
             del self._positions_held[position_key]
-            # Also clear from database so they don't get reloaded on restart
+            # Mark position hold as CLEARED in the dedicated table
             if self.db_manager:
                 try:
                     async with self.db_manager.get_session_context() as session:
                         from database.repositories.executor_repository import ExecutorRepository
                         repo = ExecutorRepository(session)
-                        count = await repo.clear_position_hold_executors(
+                        cleared = await repo.clear_position_hold(
                             account_name=account_name,
                             connector_name=connector_name,
                             trading_pair=trading_pair,
                             controller_id=controller_id
                         )
-                        logger.info(f"Cleared {count} position hold records from database for {position_key}")
+                        logger.info(f"Cleared position hold record from database for {position_key}: {cleared}")
                 except Exception as e:
-                    logger.error(f"Failed to clear position holds from database: {e}", exc_info=True)
+                    logger.error(f"Failed to clear position hold from database: {e}", exc_info=True)
             logger.info(f"Cleared position hold for {position_key}")
             return True
         return False
@@ -1173,6 +1257,7 @@ class ExecutorService:
                     "unmatched_amount_base": float(p.unmatched_amount_base),
                     "position_side": p.position_side,
                     "realized_pnl_quote": float(p.realized_pnl_quote),
+                    "cum_fees_quote": float(p.cum_fees_quote),
                     "executor_count": len(p.executor_ids),
                     "executor_ids": p.executor_ids,
                     "last_updated": p.last_updated.isoformat() if p.last_updated else None
