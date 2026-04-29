@@ -142,12 +142,16 @@ class DockerService:
         """Get the status of a container"""
         try:
             container = self.client.containers.get(container_name)
+            container.reload()
+            state = container.attrs.get("State", {})
             return {
                 "success": True,
                 "state": {
-                    "status": container.status,
-                    "running": container.status == "running",
-                    "exit_code": getattr(container.attrs.get("State", {}), "ExitCode", None)
+                    "status": state.get("Status") or container.status,
+                    "running": state.get("Running", container.status == "running"),
+                    "exit_code": state.get("ExitCode"),
+                    "started_at": state.get("StartedAt"),
+                    "finished_at": state.get("FinishedAt"),
                 }
             }
         except DockerException as e:
