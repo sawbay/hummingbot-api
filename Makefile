@@ -45,4 +45,4 @@ install-pre-commit:
 
 # Build Docker image
 build:
-	docker build -t hummingbot/hummingbot-api:latest .
+	docker build -t ghcr.io/sawbay/hummingbot-api:latest .
