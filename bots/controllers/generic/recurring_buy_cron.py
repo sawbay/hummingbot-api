@@ -15,6 +15,7 @@ class RecurringBuyCronConfig(ControllerConfigBase):
     controller_name: str = "recurring_buy_cron"
     connector_name: str = "binance_perpetual"
     trading_pair: str = "WLD-USDT"
+    side: TradeType = TradeType.BUY
     position_mode: PositionMode = PositionMode.HEDGE
     leverage: int = 20
     amount_quote: Decimal = Decimal("10")
@@ -140,7 +141,7 @@ class RecurringBuyCron(ControllerBase):
                 timestamp=self.market_data_provider.time(),
                 connector_name=self.config.connector_name,
                 trading_pair=self.config.trading_pair,
-                side=TradeType.BUY,
+                side=self.config.side,
                 amount=self.config.amount_quote / self.processed_data["mid_price"],
                 execution_strategy=ExecutionStrategy.MARKET,
                 price=self.processed_data["mid_price"],
