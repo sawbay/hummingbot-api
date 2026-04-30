@@ -713,12 +713,14 @@ class BotsOrchestrator:
         start_line = max(len(lines) - max_lines_per_file, 0)
         
         # Regex to parse Hummingbot log format: 2026-04-28 15:34:01,942 - 17 - logger.name - LEVEL - message
-        log_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - \d+ - (.*?) - (DEBUG|INFO|WARNING|ERROR|CRITICAL) - (.*)$")
+        log_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - \d+ - (.*?) - (DEBUG|INFO|WARNING|ERROR|CRITICAL|EVENT_LOG) - (.*)$")
         
         parsed_logs = []
         for index, line in enumerate(lines[start_line:]):
             line = line.strip()
             if not line:
+                continue
+            if BotsOrchestrator._should_skip_log_line(line):
                 continue
                 
             match = log_pattern.match(line)
@@ -753,6 +755,10 @@ class BotsOrchestrator:
                 })
                 
         return parsed_logs
+
+    @staticmethod
+    def _should_skip_log_line(line: str) -> bool:
+        return " - hummingbot.core.event.event_reporter - EVENT_LOG - " in line
 
     @staticmethod
     def determine_controller_performance(controller_reports):
