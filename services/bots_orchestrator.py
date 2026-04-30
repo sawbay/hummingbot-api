@@ -22,17 +22,33 @@ logger = logging.getLogger(__name__)
 class BotsOrchestrator:
     """Orchestrates Hummingbot instances using Docker and MQTT communication."""
 
-    def __init__(self, broker_host, broker_port, broker_username, broker_password):
+    def __init__(
+        self,
+        broker_host,
+        broker_port,
+        broker_username,
+        broker_password,
+        broker_ssl=False,
+        docker_service: 'DockerService' = None,
+    ):
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.broker_username = broker_username
         self.broker_password = broker_password
+        self.broker_ssl = broker_ssl
+        self.docker_service = docker_service
 
         # Initialize Docker client
         self.docker_client = docker.from_env()
 
         # Initialize MQTT manager
-        self.mqtt_manager = MQTTManager(host=broker_host, port=broker_port, username=broker_username, password=broker_password)
+        self.mqtt_manager = MQTTManager(
+            host=broker_host,
+            port=broker_port,
+            username=broker_username,
+            password=broker_password,
+            ssl=broker_ssl,
+        )
 
         # Active bots tracking
         self.active_bots = {}
@@ -42,6 +58,18 @@ class BotsOrchestrator:
         self.stopping_bots = set()
 
         # MQTT manager will be started asynchronously later
+
+    def stop_container(self, bot_name: str):
+        """Stop the Docker container for a bot."""
+        if self.docker_service:
+            return self.docker_service.stop_container(bot_name)
+        return {"success": False, "message": "DockerService not initialized in BotsOrchestrator"}
+
+    def start_container(self, bot_name: str):
+        """Start the Docker container for a bot."""
+        if self.docker_service:
+            return self.docker_service.start_container(bot_name)
+        return {"success": False, "message": "DockerService not initialized in BotsOrchestrator"}
 
     @staticmethod
     def hummingbot_containers_fiter(container):

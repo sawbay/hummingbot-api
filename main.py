@@ -220,15 +220,17 @@ async def lifespan(app: FastAPI):
     # 5. Other Services
     # =========================================================================
 
+    docker_service = DockerService()
     bots_orchestrator = BotsOrchestrator(
         broker_host=settings.broker.host,
         broker_port=settings.broker.port,
         broker_username=settings.broker.username,
-        broker_password=settings.broker.password
+        broker_password=settings.broker.password,
+        broker_ssl=settings.broker.ssl,
+        docker_service=docker_service
     )
 
     backtesting_service = BacktestingService()
-    docker_service = DockerService()
     gateway_service = GatewayService()
     bot_archiver = BotArchiver(
         settings.aws.api_key,
