@@ -1,7 +1,7 @@
 services:
   hummingbot-api:
     container_name: hummingbot-api
-    image: ghcr.io/sawbay/hummingbot-api:custom
+    image: ghcr.io/sawbay/hummingbot-api:latest
     ports:
       - "8000:8000"
     volumes:
