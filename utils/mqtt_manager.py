@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import ssl
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -17,11 +18,12 @@ class MQTTManager:
     Uses asyncio-mqtt (aiomqtt) for asynchronous MQTT operations.
     """
 
-    def __init__(self, host: str, port: int, username: str, password: str):
+    def __init__(self, host: str, port: int, username: str, password: str, ssl: bool = False):
         self.host = host
         self.port = port
         self.username = username
         self.password = password
+        self.ssl = ssl
 
         # Message handlers by topic pattern
         self._handlers: Dict[str, Callable] = {}
@@ -62,22 +64,23 @@ class MQTTManager:
         """Get MQTT client for a single connection attempt."""
         client_id = f"hummingbot-api-{int(time.time())}"
 
-        # Create client with credentials if provided
+        client_kwargs = {
+            "hostname": self.host,
+            "port": self.port,
+            "identifier": client_id,
+            "keepalive": 60,
+        }
         if self.username and self.password:
-            client = aiomqtt.Client(
-                hostname=self.host,
-                port=self.port,
-                username=self.username,
-                password=self.password,
-                identifier=client_id,
-                keepalive=60,
-            )
-        else:
-            client = aiomqtt.Client(hostname=self.host, port=self.port, identifier=client_id, keepalive=60)
+            client_kwargs["username"] = self.username
+            client_kwargs["password"] = self.password
+        if self.ssl:
+            client_kwargs["tls_context"] = ssl.create_default_context()
+
+        client = aiomqtt.Client(**client_kwargs)
 
         async with client:
             self._connected = True
-            logger.info(f"✓ Connected to MQTT broker at {self.host}:{self.port}")
+            logger.info(f"✓ Connected to MQTT broker at {self.host}:{self.port} (ssl={self.ssl})")
 
             # Subscribe to topics
             for topic, qos in self._subscriptions:
