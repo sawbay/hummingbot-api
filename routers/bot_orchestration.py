@@ -196,36 +196,6 @@ async def stop_bot(
     return {"status": "success", "response": response}
 
 
-@router.post("/{bot_name}/stop-container")
-def stop_container(bot_name: str, bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator)):
-    """
-    Stop the Docker container for a bot.
-
-    Args:
-        bot_name: Name of the bot container to stop
-        bots_manager: Bot orchestrator service dependency
-
-    Returns:
-        Response from container stop operation
-    """
-    return bots_manager.stop_container(bot_name)
-
-
-@router.post("/{bot_name}/start-container")
-def start_container(bot_name: str, bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator)):
-    """
-    Start the Docker container for a bot.
-
-    Args:
-        bot_name: Name of the bot container to start
-        bots_manager: Bot orchestrator service dependency
-
-    Returns:
-        Response from container start operation
-    """
-    return bots_manager.start_container(bot_name)
-
-
 @router.get("/bot-runs")
 async def get_bot_runs(
     bot_name: str = None,
