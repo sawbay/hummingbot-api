@@ -1,7 +1,5 @@
 import asyncio
 import logging
-import os
-from datetime import datetime
 from typing import Optional
 import re
 
@@ -19,17 +17,24 @@ logger = logging.getLogger(__name__)
 class BotsOrchestrator:
     """Orchestrates Hummingbot instances using Docker and MQTT communication."""
 
-    def __init__(self, broker_host, broker_port, broker_username, broker_password):
+    def __init__(self, broker_host, broker_port, broker_username, broker_password, broker_ssl=False):
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.broker_username = broker_username
         self.broker_password = broker_password
+        self.broker_ssl = broker_ssl
 
         # Initialize Docker client
         self.docker_client = docker.from_env()
 
         # Initialize MQTT manager
-        self.mqtt_manager = MQTTManager(host=broker_host, port=broker_port, username=broker_username, password=broker_password)
+        self.mqtt_manager = MQTTManager(
+            host=broker_host,
+            port=broker_port,
+            username=broker_username,
+            password=broker_password,
+            ssl=broker_ssl,
+        )
 
         # Active bots tracking
         self.active_bots = {}
@@ -61,29 +66,6 @@ class BotsOrchestrator:
             for container in self.docker_client.containers.list()
             if container.status == "running" and self.hummingbot_containers_fiter(container)
         ]
-
-    def _get_container_state(self, bot_name: str) -> dict:
-        """Return Docker state for a bot container, including stopped containers."""
-        try:
-            container = self.docker_client.containers.get(bot_name)
-            container.reload()
-            state = container.attrs.get("State", {})
-            return {
-                "exists": True,
-                "id": container.id,
-                "name": container.name,
-                "status": state.get("Status") or container.status,
-                "running": state.get("Running", container.status == "running"),
-                "exit_code": state.get("ExitCode"),
-                "started_at": state.get("StartedAt"),
-                "finished_at": state.get("FinishedAt"),
-                "image": container.image.tags[0] if container.image.tags else container.image.id[:12],
-            }
-        except docker.errors.NotFound:
-            return {"exists": False, "status": "not_found", "running": False}
-        except docker.errors.DockerException as e:
-            logger.warning(f"Unable to inspect container {bot_name}: {e}")
-            return {"exists": False, "status": "unknown", "running": False, "error": str(e)}
 
     def start(self):
         """Start the loop that monitors active bots."""
@@ -246,102 +228,6 @@ class BotsOrchestrator:
         return {"success": True, "data": response}
 
     @staticmethod
-    def _get_bot_storage_dirs(bot_name: str) -> list[str]:
-        return [
-            os.path.join("bots", "instances", bot_name),
-            os.path.join("bots", "archived", bot_name),
-        ]
-
-    @classmethod
-    def _bot_storage_exists(cls, bot_name: str) -> bool:
-        return any(os.path.isdir(storage_dir) for storage_dir in cls._get_bot_storage_dirs(bot_name))
-
-    @classmethod
-    def _get_bot_logs_from_files(cls, bot_name: str, max_lines_per_file: int = 1000) -> tuple[list[dict], list[dict]]:
-        general_logs = []
-        error_logs = []
-
-        for storage_dir in cls._get_bot_storage_dirs(bot_name):
-            logs_dir = os.path.join(storage_dir, "logs")
-            if not os.path.isdir(logs_dir):
-                continue
-
-            general_candidates = [
-                os.path.join(logs_dir, f"logs_{bot_name}.log"),
-                os.path.join(logs_dir, "logs_hummingbot.log"),
-            ]
-            for path in general_candidates:
-                general_logs.extend(cls._read_log_file(path, max_lines_per_file=max_lines_per_file))
-
-            error_logs.extend(
-                cls._read_log_file(
-                    os.path.join(logs_dir, "errors.log"),
-                    max_lines_per_file=max_lines_per_file,
-                    level_name="ERROR",
-                )
-            )
-
-        return general_logs, error_logs
-
-    @staticmethod
-    def _read_log_file(path: str, max_lines_per_file: int = 1000, level_name: str = "INFO") -> list[dict]:
-        if not os.path.isfile(path):
-            return []
-
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as file:
-                lines = file.readlines()
-        except OSError as e:
-            logger.warning(f"Unable to read log file {path}: {e}")
-            return []
-
-        start_line = max(len(lines) - max_lines_per_file, 0)
-        
-        # Regex to parse Hummingbot log format: 2026-04-28 15:34:01,942 - 17 - logger.name - LEVEL - message
-        log_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - \d+ - (.*?) - (DEBUG|INFO|WARNING|ERROR|CRITICAL|EVENT_LOG) - (.*)$")
-        
-        parsed_logs = []
-        for index, line in enumerate(lines[start_line:]):
-            line = line.strip()
-            if not line:
-                continue
-            if BotsOrchestrator._should_skip_log_line(line):
-                continue
-                
-            match = log_pattern.match(line)
-            if match:
-                ts_str, logger_name, level, msg = match.groups()
-                # Convert "2026-04-28 15:34:01,942" to float timestamp
-                try:
-                    # Replacing comma with dot for fractional seconds
-                    ts_dt = datetime.strptime(ts_str.replace(",", "."), "%Y-%m-%d %H:%M:%S.%f")
-                    timestamp = ts_dt.timestamp()
-                except ValueError:
-                    timestamp = None
-                
-                parsed_logs.append({
-                    "level_name": level,
-                    "msg": msg,
-                    "timestamp": timestamp,
-                    "logger_name": logger_name,
-                    "source": "file",
-                    "file": path,
-                    "line_number": start_line + index + 1,
-                })
-            else:
-                # Fallback for lines that don't match the standard format (e.g. stack traces)
-                parsed_logs.append({
-                    "level_name": level_name,
-                    "msg": line,
-                    "timestamp": None,
-                    "source": "file",
-                    "file": path,
-                    "line_number": start_line + index + 1,
-                })
-                
-        return parsed_logs
-
-    @staticmethod
     def _should_skip_log_line(line: str) -> bool:
         return " - hummingbot.core.event.event_reporter - EVENT_LOG - " in line
 
@@ -414,50 +300,33 @@ class BotsOrchestrator:
         """
         Get status information for a specific bot.
         """
+        if bot_name not in self.active_bots:
+            return {"status": "not_found", "error": f"Bot {bot_name} not found"}
+
         try:
-            container_state = self._get_container_state(bot_name)
-            bot_is_active = bot_name in self.active_bots
-            bot_has_storage = self._bot_storage_exists(bot_name)
-
-            if not bot_is_active and not container_state.get("exists") and not bot_has_storage:
-                return {
-                    "status": "not_found",
-                    "error": f"Bot {bot_name} not found",
-                    "container": container_state,
-                }
-
             # Check if bot is currently being stopped and archived
             if bot_name in self.stopping_bots:
-                file_general_logs, file_error_logs = self._get_bot_logs_from_files(bot_name)
                 return {
                     "status": "stopping",
                     "message": "Bot is currently being stopped and archived",
-                    "container": container_state,
                     "performance": {},
-                    "error_logs": file_error_logs,
-                    "general_logs": file_general_logs,
+                    "error_logs": [],
+                    "general_logs": [],
                     "recently_active": False,
                 }
             
             # Get data from MQTT manager
             controller_reports = self.mqtt_manager.get_bot_controller_reports(bot_name)
             performance = self.determine_controller_performance(controller_reports)
-            
-            # Retrieve logs only from files
-            general_logs, error_logs = self._get_bot_logs_from_files(bot_name)
+            error_logs = self.mqtt_manager.get_bot_error_logs(bot_name)
+            general_logs = self.mqtt_manager.get_bot_logs(bot_name)
 
             # Check if bot has sent recent messages (within last 30 seconds)
             discovered_bots = self.mqtt_manager.get_discovered_bots(timeout_seconds=30)
             recently_active = bot_name in discovered_bots
 
-            # Docker is the source of truth for whether the instance process exists.
-            if container_state.get("exists") and not container_state.get("running"):
-                status = "stopped"
-            elif container_state.get("exists") and not bot_is_active:
-                status = "container_running"
-            elif bot_has_storage and not bot_is_active:
-                status = "archived"
-            elif len(performance) > 0 and recently_active:
+            # Determine status based on performance data and recent activity
+            if len(performance) > 0 and recently_active:
                 status = "running"
             elif len(performance) > 0 and not recently_active:
                 status = "idle"  # Has performance data but no recent activity
@@ -466,14 +335,10 @@ class BotsOrchestrator:
 
             return {
                 "status": status,
-                "container": container_state,
                 "performance": performance,
                 "error_logs": error_logs,
                 "general_logs": general_logs,
                 "recently_active": recently_active,
-                "source": self.active_bots.get(bot_name, {}).get(
-                    "source", "docker" if container_state.get("exists") else "unknown"
-                ),
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}
