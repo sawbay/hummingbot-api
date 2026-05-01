@@ -3,7 +3,7 @@ import json
 import logging
 import ssl
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, Optional, Set
 
@@ -30,10 +30,16 @@ class MQTTManager:
 
         # Bot data storage - stores full controller reports (performance + custom_info)
         self._bot_controller_reports: Dict[str, Dict] = defaultdict(dict)
+        self._bot_logs: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
+        self._bot_error_logs: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
 
         # Auto-discovered bots
         self._discovered_bots: Dict[str, float] = {}  # bot_id: last_seen_timestamp
         
+        # Message deduplication tracking
+        self._processed_messages: Dict[str, float] = {}  # message_hash: timestamp
+        self._message_ttl = 300  # 5 minutes TTL for processed messages
+
         # Connection state
         self._connected = False
         self._reconnect_interval = 5  # seconds
@@ -45,6 +51,7 @@ class MQTTManager:
 
         # Subscriptions to restore on reconnect
         self._subscriptions = [
+            ("hbot/+/log", 1),  # Log messages
             ("hbot/+/notify", 1),  # Notifications
             ("hbot/+/status_updates", 1),  # Status updates
             ("hbot/+/events", 1),  # Internal events
@@ -131,7 +138,9 @@ class MQTTManager:
                         data = message.payload.decode("utf-8")
 
                     # Route to appropriate handler based on Hummingbot's topics
-                    if channel == "notify":
+                    if channel == "log":
+                        await self._handle_log(bot_id, data)
+                    elif channel == "notify":
                         await self._handle_notify(bot_id, data)
                     elif channel == "status_updates":
                         await self._handle_status(bot_id, data)
@@ -191,6 +200,60 @@ class MQTTManager:
                 if bot_id not in self._bot_controller_reports:
                     self._bot_controller_reports[bot_id] = {}
                 self._bot_controller_reports[bot_id][controller_id] = controller_report
+
+    async def _handle_log(self, bot_id: str, data: Any):
+        """Handle log messages with deduplication."""
+        # Create a unique message identifier for deduplication
+        if isinstance(data, dict):
+            level = data.get("level_name") or data.get("levelname") or data.get("level", "INFO")
+            message = data.get("msg") or data.get("message", "")
+            timestamp = data.get("timestamp") or data.get("time") or time.time()
+            
+            # Create hash for deduplication (bot_id + message + timestamp within 1 second)
+            message_hash = f"{bot_id}:{message}:{int(timestamp)}"
+        elif isinstance(data, str):
+            message = data
+            timestamp = time.time()
+            level = "INFO"
+            
+            # Create hash for string messages
+            message_hash = f"{bot_id}:{message}:{int(timestamp)}"
+        else:
+            return  # Skip invalid data
+
+        # Check for duplicates
+        current_time = time.time()
+        if message_hash in self._processed_messages:
+            # Skip duplicate message
+            logger.debug(f"Skipping duplicate log message from {bot_id}: {message[:50]}...")
+            return
+
+        # Clean up old message hashes (older than TTL)
+        expired_hashes = [h for h, t in self._processed_messages.items() if current_time - t > self._message_ttl]
+        for h in expired_hashes:
+            del self._processed_messages[h]
+
+        # Record this message as processed
+        self._processed_messages[message_hash] = current_time
+
+        # Process the message
+        if isinstance(data, dict):
+            # Normalize the log entry
+            log_entry = {
+                "level_name": level,
+                "msg": message,
+                "timestamp": timestamp,
+                **data,  # Include all original fields
+            }
+
+            if level.upper() == "ERROR":
+                self._bot_error_logs[bot_id].append(log_entry)
+            else:
+                self._bot_logs[bot_id].append(log_entry)
+        elif isinstance(data, str):
+            # Handle plain string logs
+            log_entry = {"level_name": "INFO", "msg": data, "timestamp": timestamp}
+            self._bot_logs[bot_id].append(log_entry)
 
     async def _handle_notify(self, bot_id: str, data: Any):
         """Handle notification messages."""
@@ -426,9 +489,19 @@ class MQTTManager:
         """
         return self._bot_controller_reports.get(bot_id, {})
 
+    def get_bot_logs(self, bot_id: str) -> list:
+        """Get recent logs for a bot."""
+        return list(self._bot_logs.get(bot_id, []))
+
+    def get_bot_error_logs(self, bot_id: str) -> list:
+        """Get recent error logs for a bot."""
+        return list(self._bot_error_logs.get(bot_id, []))
+
     def clear_bot_data(self, bot_id: str):
         """Clear stored data for a bot."""
         self._bot_controller_reports.pop(bot_id, None)
+        self._bot_logs.pop(bot_id, None)
+        self._bot_error_logs.pop(bot_id, None)
         self._discovered_bots.pop(bot_id, None)
 
     def clear_bot_controller_reports(self, bot_id: str):
