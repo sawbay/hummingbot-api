@@ -96,11 +96,7 @@ async def get_bot_history(
     verbose: bool = False,
     precision: int = None,
     timeout: float = 30.0,
-    limit: int = None,
-    offset: int = 0,
-    allow_unfiltered: bool = False,
-    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator)
 ):
     """
     Get trading history for a bot with optional parameters.
@@ -121,11 +117,7 @@ async def get_bot_history(
         days=days,
         verbose=verbose,
         precision=precision,
-        timeout=timeout,
-        limit=limit,
-        offset=offset,
-        allow_unfiltered=allow_unfiltered,
-        db_manager=db_manager
+        timeout=timeout
     )
     return {"status": "success", "response": response}
 
