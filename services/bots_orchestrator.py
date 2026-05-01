@@ -1,7 +1,5 @@
 import asyncio
 import logging
-import os
-import time
 from typing import Optional
 import re
 
@@ -61,29 +59,6 @@ class BotsOrchestrator:
             for container in self.docker_client.containers.list()
             if container.status == "running" and self.hummingbot_containers_fiter(container)
         ]
-
-    def _get_container_state(self, bot_name: str) -> dict:
-        """Return Docker state for a bot container, including stopped containers."""
-        try:
-            container = self.docker_client.containers.get(bot_name)
-            container.reload()
-            state = container.attrs.get("State", {})
-            return {
-                "exists": True,
-                "id": container.id,
-                "name": container.name,
-                "status": state.get("Status") or container.status,
-                "running": state.get("Running", container.status == "running"),
-                "exit_code": state.get("ExitCode"),
-                "started_at": state.get("StartedAt"),
-                "finished_at": state.get("FinishedAt"),
-                "image": container.image.tags[0] if container.image.tags else container.image.id[:12],
-            }
-        except docker.errors.NotFound:
-            return {"exists": False, "status": "not_found", "running": False}
-        except docker.errors.DockerException as e:
-            logger.warning(f"Unable to inspect container {bot_name}: {e}")
-            return {"exists": False, "status": "unknown", "running": False, "error": str(e)}
 
     def start(self):
         """Start the loop that monitors active bots."""
@@ -244,13 +219,6 @@ class BotsOrchestrator:
             }
 
         return {"success": True, "data": response}
-
-    @staticmethod
-    def _get_bot_storage_dirs(bot_name: str) -> list[str]:
-        return [
-            os.path.join("bots", "instances", bot_name),
-            os.path.join("bots", "archived", bot_name),
-        ]
 
     @staticmethod
     def _should_skip_log_line(line: str) -> bool:
