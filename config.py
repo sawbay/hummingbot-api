@@ -11,6 +11,7 @@ class BrokerSettings(BaseSettings):
     port: int = Field(default=1883, description="MQTT broker port")
     username: str = Field(default="admin", description="MQTT broker username")
     password: str = Field(default="password", description="MQTT broker password")
+    ssl: bool = Field(default=False, description="Enable TLS for MQTT broker connections")
 
     model_config = SettingsConfigDict(env_prefix="BROKER_", extra="ignore")
 

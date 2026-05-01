@@ -17,17 +17,24 @@ logger = logging.getLogger(__name__)
 class BotsOrchestrator:
     """Orchestrates Hummingbot instances using Docker and MQTT communication."""
 
-    def __init__(self, broker_host, broker_port, broker_username, broker_password):
+    def __init__(self, broker_host, broker_port, broker_username, broker_password, broker_ssl=False):
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.broker_username = broker_username
         self.broker_password = broker_password
+        self.broker_ssl = broker_ssl
 
         # Initialize Docker client
         self.docker_client = docker.from_env()
 
         # Initialize MQTT manager
-        self.mqtt_manager = MQTTManager(host=broker_host, port=broker_port, username=broker_username, password=broker_password)
+        self.mqtt_manager = MQTTManager(
+            host=broker_host,
+            port=broker_port,
+            username=broker_username,
+            password=broker_password,
+            ssl=broker_ssl,
+        )
 
         # Active bots tracking
         self.active_bots = {}
@@ -219,6 +226,10 @@ class BotsOrchestrator:
             }
 
         return {"success": True, "data": response}
+
+    @staticmethod
+    def _should_skip_log_line(line: str) -> bool:
+        return " - hummingbot.core.event.event_reporter - EVENT_LOG - " in line
 
     @staticmethod
     def determine_controller_performance(controller_reports):
