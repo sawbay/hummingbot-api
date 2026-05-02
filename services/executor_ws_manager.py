@@ -14,9 +14,10 @@ from typing import Any, Dict, Optional
 
 from fastapi import WebSocket
 
+from services.bots_orchestrator import BotsOrchestrator
+from services.docker_service import DockerService
 from services.executor_service import ExecutorService
 from services.market_data_service import MarketDataService
-from services.bots_orchestrator import BotsOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ SUBSCRIPTION_TYPES = {
     "executor_logs",
     "bot_status",
     "all_bots_status",
+    "bot_deployment",  # tracks a single bot from deploy → running/failed
 }
 
 
@@ -94,10 +96,12 @@ class ExecutorWebSocketManager:
         executor_service: ExecutorService,
         market_data_service: MarketDataService,
         bots_orchestrator: Optional[BotsOrchestrator] = None,
+        docker_service: Optional["DockerService"] = None,
     ):
         self._executor_service = executor_service
         self._market_data_service = market_data_service
         self._bots_orchestrator = bots_orchestrator
+        self._docker_service = docker_service
         # conn_id -> {sub_id -> ExecutorSubscription}
         self._subscriptions: Dict[str, Dict[str, ExecutorSubscription]] = {}
 
@@ -178,6 +182,17 @@ class ExecutorWebSocketManager:
                 return
             sub.sub_id = "all_bots_status"
 
+        elif sub_type == "bot_deployment":
+            instance_name = msg.get("instance_name")
+            if not instance_name:
+                await self._send_error(websocket, "bot_deployment requires 'instance_name'")
+                return
+            if not self._bots_orchestrator:
+                await self._send_error(websocket, "Bot orchestrator not available")
+                return
+            sub.bot_name = instance_name  # reuse bot_name field for instance_name
+            sub.sub_id = f"bot_deployment_{instance_name}"
+
         # Cancel existing subscription with same ID for this connection
         conn_subs = self._subscriptions.setdefault(conn_id, {})
         if sub.sub_id in conn_subs:
@@ -249,6 +264,7 @@ class ExecutorWebSocketManager:
             "executor_logs": self._logs_push_loop,
             "bot_status": self._bot_status_push_loop,
             "all_bots_status": self._all_bots_status_push_loop,
+            "bot_deployment": self._bot_deployment_push_loop,
         }[sub_type]
 
     # ------------------------------------------------------------------
@@ -519,6 +535,98 @@ class ExecutorWebSocketManager:
                         })
                 except Exception as e:
                     logger.error(f"[WS-Exec] all_bots_status push error: {e}", exc_info=True)
+                await asyncio.sleep(sub.update_interval)
+        except asyncio.CancelledError:
+            pass
+
+    async def _bot_deployment_push_loop(
+        self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
+    ) -> None:
+        """Push deployment status events for a specific instance until it is running or failed.
+
+        Combines three sources (same as REST /deployment-status/{instance_name}):
+          - pending_bots registry (in-memory, instant)
+          - active_bots (MQTT/Docker discovered)
+          - Docker container health (exit code + logs)
+
+        Sends a push on every status change and automatically unsubscribes itself
+        once the terminal state (running / failed) is reached.
+        """
+        instance_name = sub.bot_name  # stored in bot_name field
+        try:
+            while True:
+                try:
+                    orchestrator = self._bots_orchestrator
+
+                    # 1. Check active bots first (fastest "it's running" signal)
+                    is_active = instance_name in orchestrator.active_bots
+
+                    # 2. Pending registry
+                    pending_meta = orchestrator.pending_bots.get(instance_name)
+
+                    # 3. Docker health (only when not yet active)
+                    container_info = None
+                    if not is_active and self._docker_service:
+                        health = self._docker_service.get_container_health(instance_name)
+                        container_info = {
+                            "found": health.get("found"),
+                            "status": health.get("status"),
+                            "running": health.get("running"),
+                            "exit_code": health.get("exit_code"),
+                            "error": health.get("error"),
+                        }
+
+                    # Derive overall_status
+                    if is_active:
+                        overall_status = "running"
+                    elif pending_meta and pending_meta.get("status") == "failed":
+                        overall_status = "failed"
+                    elif (
+                        container_info
+                        and container_info.get("exit_code") not in (None, 0)
+                        and not container_info.get("running")
+                    ):
+                        overall_status = "failed"
+                    else:
+                        overall_status = "deploying"
+
+                    payload = {
+                        "instance_name": instance_name,
+                        "overall_status": overall_status,
+                        "is_active": is_active,
+                        "pending_status": pending_meta.get("status") if pending_meta else None,
+                        "pending_error": pending_meta.get("error") if pending_meta else None,
+                        "container": container_info,
+                    }
+
+                    h = _compute_hash(payload)
+                    if h != sub.last_sent_hash:
+                        sub.last_sent_hash = h
+                        await websocket.send_json({
+                            "type": "bot_deployment",
+                            "subscription_id": sub.sub_id,
+                            "data": payload,
+                            "timestamp": time.time(),
+                        })
+
+                    # Stop pushing once we've reached a terminal state
+                    if overall_status in ("running", "failed"):
+                        # Send a final "resolved" notification and auto-unsubscribe
+                        await websocket.send_json({
+                            "type": "bot_deployment_resolved",
+                            "subscription_id": sub.sub_id,
+                            "instance_name": instance_name,
+                            "final_status": overall_status,
+                            "timestamp": time.time(),
+                        })
+                        logger.info(
+                            f"[WS-Exec] bot_deployment for {instance_name} resolved: {overall_status}"
+                        )
+                        return  # exit the push loop naturally
+
+                except Exception as e:
+                    logger.error(f"[WS-Exec] bot_deployment push error: {e}", exc_info=True)
+
                 await asyncio.sleep(sub.update_interval)
         except asyncio.CancelledError:
             pass
