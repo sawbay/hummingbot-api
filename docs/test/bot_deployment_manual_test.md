@@ -99,3 +99,20 @@ curl -s -u admin:admin http://localhost:8000/bot-orchestration/deployment-status
 ```bash
 curl -s -u admin:admin -X POST "http://localhost:8000/bot-orchestration/stop-and-archive-bot/test-grid-YYYYMMDD-HHMMSS"
 ```
+---
+
+## Phase 5: Automated E2E Test
+
+An automated script is available to verify the entire flow (REST trigger → WS tracking → DB verification) in a single run.
+
+### Running the Test
+```bash
+# Ensure you are in the project root
+python3 test/e2e_bot_deployment.py
+```
+
+### What it verifies:
+1.  **REST API**: `/bot-orchestration/deploy-v2-controllers` returns a valid unique name.
+2.  **WebSocket**: Connection to `/ws/executors` and subscription to `bot_deployment` works.
+3.  **Lifecycle**: Correct transition from `deploying` to terminal states.
+4.  **Database**: `BotRun` records are created and updated with logs on failure.
