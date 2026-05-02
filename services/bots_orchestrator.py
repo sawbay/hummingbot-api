@@ -39,9 +39,14 @@ class BotsOrchestrator:
         # Active bots tracking
         self.active_bots = {}
         self._update_bots_task: Optional[asyncio.Task] = None
-        
+
         # Track bots that are currently being stopped and archived
         self.stopping_bots = set()
+
+        # Bots that have been deployed but not yet discovered via Docker/MQTT.
+        # Keys are instance_name strings; values are deployment metadata dicts.
+        # Entries are removed once the bot appears in active_bots.
+        self.pending_bots: dict = {}
 
         # MQTT manager will be started asynchronously later
 
@@ -116,6 +121,8 @@ class BotsOrchestrator:
                             "status": "connected",
                             "source": "docker" if bot_name in docker_bots else "mqtt",
                         }
+                        # Promote from pending if it was waiting
+                        self.pending_bots.pop(bot_name, None)
                         # Subscribe to this specific bot's topics
                         await self.mqtt_manager.subscribe_to_bot(bot_name)
 
@@ -123,6 +130,27 @@ class BotsOrchestrator:
                 logger.error(f"Error in update_active_bots: {e}", exc_info=True)
 
             await asyncio.sleep(sleep_time)
+
+    # ---------------------------------------------------------------------------
+    # Pending bot registry
+    # ---------------------------------------------------------------------------
+
+    def register_pending_bot(self, instance_name: str, metadata: dict) -> None:
+        """Register a newly-deployed bot so it shows up in status before Docker/MQTT pick it up."""
+        if instance_name not in self.active_bots:
+            self.pending_bots[instance_name] = {"status": "deploying", **metadata}
+            logger.info(f"Registered pending bot: {instance_name}")
+
+    def mark_pending_bot_failed(self, instance_name: str, error: str) -> None:
+        """Update a pending bot's status to 'failed' (container crashed on start)."""
+        if instance_name in self.pending_bots:
+            self.pending_bots[instance_name]["status"] = "failed"
+            self.pending_bots[instance_name]["error"] = error
+            logger.info(f"Marked pending bot as failed: {instance_name}")
+
+    def resolve_pending_bot(self, instance_name: str) -> None:
+        """Remove a bot from the pending registry (used when it is confirmed running)."""
+        self.pending_bots.pop(instance_name, None)
 
     # Interact with a specific bot
     async def start_bot(self, bot_name, **kwargs):
@@ -287,13 +315,28 @@ class BotsOrchestrator:
         return cleaned_data
 
     def get_all_bots_status(self):
-        # TODO: improve logic of bots state management
-        """Get status information for all active bots."""
+        """Get status information for all active bots (including recently-deployed pending bots)."""
         all_bots_status = {}
+
+        # Active / live bots
         for bot in [bot for bot in self.active_bots if not self.is_bot_stopping(bot)]:
             status = self.get_bot_status(bot)
             status["source"] = self.active_bots[bot].get("source", "unknown")
             all_bots_status[bot] = status
+
+        # Pending bots that haven't appeared yet
+        for bot_name, meta in self.pending_bots.items():
+            if bot_name not in all_bots_status:
+                all_bots_status[bot_name] = {
+                    "status": meta.get("status", "deploying"),
+                    "error": meta.get("error"),
+                    "performance": {},
+                    "error_logs": [],
+                    "general_logs": [],
+                    "recently_active": False,
+                    "source": "pending",
+                }
+
         return all_bots_status
 
     def get_bot_status(self, bot_name):

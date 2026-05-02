@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Bot Orchestration"], prefix="/bot-orchestration")
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+# How long (seconds) to keep polling after a container is created before
+# giving up and declaring it healthy (it may just be slow to start).
+_DEPLOY_HEALTH_CHECK_TIMEOUT = 60
+# Interval (seconds) between container status polls during the health check.
+_DEPLOY_HEALTH_CHECK_INTERVAL = 3
+
 
 @router.get("/status")
 def get_active_bots_status(bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator)):
@@ -349,6 +358,90 @@ async def get_bot_run_stats(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ---------------------------------------------------------------------------
+# Post-deploy health check
+# ---------------------------------------------------------------------------
+
+async def _post_deploy_health_check(
+    instance_name: str,
+    docker_manager: DockerService,
+    bots_manager: BotsOrchestrator,
+    db_manager: AsyncDatabaseManager,
+):
+    """
+    Background task that monitors a newly-created container for the first
+    `_DEPLOY_HEALTH_CHECK_TIMEOUT` seconds.
+
+    - If the container exits with a non-zero code   → mark BotRun ERROR/FAILED,
+      capture Docker logs, update pending registry.
+    - If the container is still running after timeout → mark BotRun RUNNING
+      (MQTT will catch up naturally).
+    """
+    logger.info(f"[health-check] Starting post-deploy check for {instance_name}")
+    elapsed = 0
+
+    while elapsed < _DEPLOY_HEALTH_CHECK_TIMEOUT:
+        await asyncio.sleep(_DEPLOY_HEALTH_CHECK_INTERVAL)
+        elapsed += _DEPLOY_HEALTH_CHECK_INTERVAL
+
+        health = docker_manager.get_container_health(instance_name)
+
+        if not health["found"]:
+            # Container disappeared – treat as failure
+            error_msg = f"Container not found after deployment: {health.get('error', 'unknown')}"
+            logger.error(f"[health-check] {instance_name}: {error_msg}")
+            bots_manager.mark_pending_bot_failed(instance_name, error_msg)
+            try:
+                async with db_manager.get_session_context() as session:
+                    repo = BotRunRepository(session)
+                    await repo.update_bot_run_failed(instance_name, error_msg)
+            except Exception as db_err:
+                logger.error(f"[health-check] DB update failed: {db_err}")
+            return
+
+        if not health["running"] and health["exit_code"] not in (None, 0):
+            # Container crashed
+            error_msg = health.get("error", f"Container exited with code {health['exit_code']}")
+            container_logs = health.get("logs", "")
+            logger.error(f"[health-check] {instance_name} crashed: {error_msg}")
+            bots_manager.mark_pending_bot_failed(instance_name, error_msg)
+            try:
+                async with db_manager.get_session_context() as session:
+                    repo = BotRunRepository(session)
+                    await repo.update_bot_run_failed(instance_name, error_msg, container_logs)
+            except Exception as db_err:
+                logger.error(f"[health-check] DB update failed: {db_err}")
+            return
+
+        if health["running"]:
+            # Container is running — mark RUNNING and stop polling
+            logger.info(f"[health-check] {instance_name} is running after {elapsed}s")
+            bots_manager.resolve_pending_bot(instance_name)
+            try:
+                async with db_manager.get_session_context() as session:
+                    repo = BotRunRepository(session)
+                    await repo.update_bot_run_running(instance_name)
+            except Exception as db_err:
+                logger.error(f"[health-check] DB update failed: {db_err}")
+            return
+
+        logger.debug(f"[health-check] {instance_name}: status={health['status']} ({elapsed}s elapsed)")
+
+    # Timed out — container is still in a non-running, non-crashed state (e.g. 'created').
+    # Optimistically mark as RUNNING; the bot may still be initialising.
+    logger.warning(
+        f"[health-check] {instance_name}: timed out after {_DEPLOY_HEALTH_CHECK_TIMEOUT}s — "
+        "assuming still starting up"
+    )
+    bots_manager.resolve_pending_bot(instance_name)
+    try:
+        async with db_manager.get_session_context() as session:
+            repo = BotRunRepository(session)
+            await repo.update_bot_run_running(instance_name)
+    except Exception as db_err:
+        logger.error(f"[health-check] DB update failed: {db_err}")
+
+
 async def _background_stop_and_archive(
     bot_name: str,
     container_name: str,
@@ -595,7 +688,9 @@ async def stop_and_archive_bot(
 @router.post("/deploy-v2-controllers")
 async def deploy_v2_controllers(
     deployment: V2ControllerDeployment,
+    background_tasks: BackgroundTasks,
     docker_manager: DockerService = Depends(get_docker_service),
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
     db_manager: AsyncDatabaseManager = Depends(get_database_manager)
 ):
     """
@@ -659,6 +754,12 @@ async def deploy_v2_controllers(
             response["controllers_deployed"] = deployment.controllers_config
             response["unique_instance_name"] = unique_instance_name
 
+            # Register the bot as deploying so it shows up in status immediately
+            bots_manager.register_pending_bot(
+                unique_instance_name,
+                {"strategy": "v2_with_controllers", "account": deployment.credentials_profile}
+            )
+
             # Track bot run if deployment was successful
             try:
                 async with db_manager.get_session_context() as session:
@@ -678,6 +779,15 @@ async def deploy_v2_controllers(
                 logger.error(f"Failed to create bot run record: {e}")
                 # Don't fail the deployment if bot run creation fails
 
+            # Start background health check
+            background_tasks.add_task(
+                _post_deploy_health_check,
+                instance_name=unique_instance_name,
+                docker_manager=docker_manager,
+                bots_manager=bots_manager,
+                db_manager=db_manager,
+            )
+
         return response
 
     except Exception as e:
@@ -688,7 +798,9 @@ async def deploy_v2_controllers(
 @router.post("/deploy-v2-script")
 async def deploy_v2_script(
     deployment: V2ScriptDeployment,
+    background_tasks: BackgroundTasks,
     docker_manager: DockerService = Depends(get_docker_service),
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
     db_manager: AsyncDatabaseManager = Depends(get_database_manager)
 ):
     """
@@ -721,6 +833,12 @@ async def deploy_v2_script(
         if response.get("success"):
             response["unique_instance_name"] = unique_instance_name
 
+            # Register the bot as deploying so it shows up in status immediately
+            bots_manager.register_pending_bot(
+                unique_instance_name,
+                {"strategy": deployment.script or "default", "account": deployment.credentials_profile}
+            )
+
             # Track bot run if deployment was successful
             try:
                 async with db_manager.get_session_context() as session:
@@ -740,8 +858,92 @@ async def deploy_v2_script(
                 logger.error(f"Failed to create bot run record: {e}")
                 # Don't fail the deployment if bot run creation fails
 
+            # Start background health check
+            background_tasks.add_task(
+                _post_deploy_health_check,
+                instance_name=unique_instance_name,
+                docker_manager=docker_manager,
+                bots_manager=bots_manager,
+                db_manager=db_manager,
+            )
+
         return response
 
     except Exception as e:
         logging.error(f"Error deploying V2 script: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/deployment-status/{instance_name}")
+async def get_deployment_status(
+    instance_name: str,
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
+    docker_manager: DockerService = Depends(get_docker_service),
+    db_manager: AsyncDatabaseManager = Depends(get_database_manager),
+):
+    """
+    Fast polling endpoint for tracking a newly-deployed bot.
+
+    Returns a unified status from three sources:
+    - **db**: run_status (CREATED, RUNNING, ERROR) and deployment_status from the database.
+    - **container**: real-time Docker container state (running, exited, …).
+    - **orchestrator**: whether the bot has been discovered via Docker/MQTT.
+
+    Frontend should poll this at ~2-3 second intervals until
+    `overall_status` is `running` or `failed`.
+    """
+    # 1. Pending registry (in-memory, fastest)
+    pending_meta = bots_manager.pending_bots.get(instance_name)
+
+    # 2. Active bots (MQTT/Docker discovered)
+    is_active = instance_name in bots_manager.active_bots
+
+    # 3. Docker container health (one quick API call)
+    container_health = docker_manager.get_container_health(instance_name)
+
+    # 4. Database status
+    db_status = None
+    try:
+        async with db_manager.get_session_context() as session:
+            repo = BotRunRepository(session)
+            db_status = await repo.get_deployment_status(instance_name)
+    except Exception as e:
+        logger.error(f"Failed to fetch deployment status from DB for {instance_name}: {e}")
+
+    # Derive an overall_status that the frontend can act on immediately
+    if is_active:
+        overall_status = "running"
+    elif pending_meta and pending_meta.get("status") == "failed":
+        overall_status = "failed"
+    elif container_health.get("exit_code") not in (None, 0) and not container_health.get("running"):
+        overall_status = "failed"
+    elif db_status and db_status.get("run_status") == "ERROR":
+        overall_status = "failed"
+    elif db_status and db_status.get("run_status") == "RUNNING":
+        overall_status = "running"
+    else:
+        overall_status = "deploying"
+
+    return {
+        "status": "success",
+        "data": {
+            "instance_name": instance_name,
+            "overall_status": overall_status,
+            "orchestrator": {
+                "is_active": is_active,
+                "is_pending": pending_meta is not None,
+                "pending_status": pending_meta.get("status") if pending_meta else None,
+                "pending_error": pending_meta.get("error") if pending_meta else None,
+            },
+            "container": {
+                "found": container_health.get("found"),
+                "status": container_health.get("status"),
+                "running": container_health.get("running"),
+                "exit_code": container_health.get("exit_code"),
+                "error": container_health.get("error"),
+                # Include container logs only on failure to keep the response lightweight
+                "logs": container_health.get("logs") if overall_status == "failed" else None,
+            },
+            "db": db_status,
+        },
+    }
