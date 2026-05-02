@@ -161,7 +161,56 @@ class DockerService:
         except DockerException as e:
             return {"success": False, "message": str(e)}
 
+    def get_container_logs(self, container_name: str, tail: int = 100) -> str:
+        """Fetch recent container logs as a plain string."""
+        try:
+            container = self.client.containers.get(container_name)
+            raw = container.logs(tail=tail, timestamps=False)
+            return raw.decode("utf-8", errors="replace")
+        except DockerException as e:
+            return f"[error fetching logs: {e}]"
+
+    def get_container_health(self, container_name: str, include_logs: bool = False) -> dict:
+        """Return a unified health dict: running state, exit code, and optionally recent logs.
+
+        Returned keys:
+            found         bool
+            status        str  ("running", "exited", "created", "restarting", …)
+            running       bool
+            exit_code     int | None
+            error         str | None   (set when container exited with non-zero)
+            logs          str | None   (last 100 lines, only when include_logs=True or exit_code != 0)
+        """
+        try:
+            container = self.client.containers.get(container_name)
+            state = container.attrs.get("State", {})
+            status = container.status          # "running", "exited", …
+            running = state.get("Running", False)
+            exit_code = state.get("ExitCode")  # 0 means clean exit
+
+            result = {
+                "found": True,
+                "status": status,
+                "running": running,
+                "exit_code": exit_code,
+                "error": None,
+                "logs": None,
+            }
+
+            # Automatically capture logs on non-zero exit
+            if not running and exit_code not in (None, 0):
+                result["error"] = f"Container exited with code {exit_code}"
+                result["logs"] = self.get_container_logs(container_name)
+            elif include_logs:
+                result["logs"] = self.get_container_logs(container_name)
+
+            return result
+        except DockerException as e:
+            return {"found": False, "status": "not_found", "running": False,
+                    "exit_code": None, "error": str(e), "logs": None}
+
     def create_hummingbot_instance(self, config: V2ControllerDeployment):
+
         bots_path = os.environ.get('BOTS_PATH', self.SOURCE_PATH)  # Default to 'SOURCE_PATH' if BOTS_PATH is not set
         instance_name = config.instance_name
         instance_dir = os.path.join("bots", 'instances', instance_name)

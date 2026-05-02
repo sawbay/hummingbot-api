@@ -70,7 +70,56 @@ class BotRunRepository:
             
         return bot_run
 
-    async def update_bot_run_archived(self, bot_name: str) -> Optional[BotRun]:
+    async def update_bot_run_running(self, bot_name: str) -> Optional["BotRun"]:
+        """Transition a bot run from CREATED → RUNNING once the container is confirmed healthy."""
+        stmt = select(BotRun).where(
+            and_(
+                BotRun.bot_name == bot_name,
+                BotRun.run_status == "CREATED"
+            )
+        ).order_by(desc(BotRun.deployed_at))
+
+        result = await self.session.execute(stmt)
+        bot_run = result.scalar_one_or_none()
+
+        if bot_run:
+            bot_run.run_status = "RUNNING"
+            await self.session.flush()
+            await self.session.refresh(bot_run)
+
+        return bot_run
+
+    async def update_bot_run_failed(
+        self,
+        bot_name: str,
+        error_message: str,
+        container_logs: Optional[str] = None
+    ) -> Optional["BotRun"]:
+        """Mark a bot run as FAILED after a container start error."""
+        stmt = select(BotRun).where(
+            and_(
+                BotRun.bot_name == bot_name,
+                or_(BotRun.run_status == "CREATED", BotRun.run_status == "RUNNING")
+            )
+        ).order_by(desc(BotRun.deployed_at))
+
+        result = await self.session.execute(stmt)
+        bot_run = result.scalar_one_or_none()
+
+        if bot_run:
+            bot_run.run_status = "ERROR"
+            bot_run.deployment_status = "FAILED"
+            bot_run.stopped_at = datetime.now(timezone.utc)
+            combined_error = error_message
+            if container_logs:
+                combined_error = f"{error_message}\n\nContainer logs:\n{container_logs}"
+            bot_run.error_message = combined_error
+            await self.session.flush()
+            await self.session.refresh(bot_run)
+
+        return bot_run
+
+    async def update_bot_run_archived(self, bot_name: str) -> Optional["BotRun"]:
         """Mark a bot run as archived."""
         stmt = select(BotRun).where(
             BotRun.bot_name == bot_name
@@ -86,6 +135,27 @@ class BotRunRepository:
             await self.session.refresh(bot_run)
             
         return bot_run
+
+    async def get_deployment_status(self, bot_name: str) -> Optional[Dict[str, Any]]:
+        """Return a lightweight deployment status dict for polling (latest run only)."""
+        stmt = select(BotRun).where(
+            BotRun.bot_name == bot_name
+        ).order_by(desc(BotRun.deployed_at))
+
+        result = await self.session.execute(stmt)
+        bot_run = result.scalar_one_or_none()
+
+        if not bot_run:
+            return None
+
+        return {
+            "id": bot_run.id,
+            "bot_name": bot_run.bot_name,
+            "run_status": bot_run.run_status,
+            "deployment_status": bot_run.deployment_status,
+            "deployed_at": bot_run.deployed_at.isoformat() if bot_run.deployed_at else None,
+            "error_message": bot_run.error_message,
+        }
 
     async def get_bot_runs(
         self,
