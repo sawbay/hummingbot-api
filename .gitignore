@@ -171,6 +171,7 @@ gateway-files/
 # Hummingbot credentials and local data
 bots/credentials/
 bots/instances/
+bots/archived/
 bots/conf/
 
 # Local MCP configuration (project-specific overrides)
@@ -179,4 +180,3 @@ bots/conf/
 # IDE files
 .vscode/
 .idea/
-bots/archived/
