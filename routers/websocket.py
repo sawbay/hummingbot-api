@@ -180,6 +180,8 @@ async def executors_websocket(websocket: WebSocket) -> None:
         - executor_logs: streaming log entries for an executor
         - bot_status: single bot status with performance & custom_info (requires bot_name)
         - all_bots_status: all active bots status with performance & custom_info
+        - bot_deployment: tracks a single bot deploy → running/failed; requires instance_name,
+                          auto-unsubscribes on terminal state and emits bot_deployment_resolved
     """
     await websocket.accept()
 
