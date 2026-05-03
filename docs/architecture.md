@@ -32,7 +32,7 @@ config.py                  Pydantic Settings (reads from .env)
 ## Core Infrastructure
 
 1. **Docker**: Used to manage the lifecycle of Hummingbot trading bot instances.
-2. **EMQX/MQTT**: The primary communication channel between the API and running bots.
+2. **EMQX/MQTT**: The primary communication channel between the API and running bots. See [MQTT Communication](mqtt.md).
 3. **PostgreSQL**: Persistent storage for bot runs, configurations, and historical data.
 4. **Hummingbot SDK**: Used for connector logic and strategy management.
 
