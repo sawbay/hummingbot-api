@@ -745,6 +745,55 @@ async def stop_and_archive_bot(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/{bot_name}/controllers/{controller_id}/start")
+async def start_controller(
+    bot_name: str,
+    controller_id: str,
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
+):
+    """Start a single controller inside a running bot without restarting it."""
+    result = await bots_manager.start_controller(bot_name, controller_id)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=404 if "not found" in result.get("message", "") else 500,
+            detail=result.get("message")
+        )
+    return {"status": "success", "data": result}
+
+
+@router.post("/{bot_name}/controllers/{controller_id}/stop")
+async def stop_controller(
+    bot_name: str,
+    controller_id: str,
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
+):
+    """Stop a single controller inside a running bot without stopping other controllers."""
+    result = await bots_manager.stop_controller(bot_name, controller_id)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=404 if "not found" in result.get("message", "") else 500,
+            detail=result.get("message")
+        )
+    return {"status": "success", "data": result}
+
+
+@router.put("/{bot_name}/controllers/{controller_id}/config")
+async def update_controller_config(
+    bot_name: str,
+    controller_id: str,
+    params: dict,
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
+):
+    """Hot-reload a single controller's config parameters while the bot keeps running."""
+    result = await bots_manager.set_controller_config(bot_name, controller_id, params)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=404 if "not found" in result.get("message", "") else 500,
+            detail=result.get("message")
+        )
+    return {"status": "success", "data": result}
+
+
 @router.post("/deploy-v2-controllers")
 async def deploy_v2_controllers(
     deployment: V2ControllerDeployment,

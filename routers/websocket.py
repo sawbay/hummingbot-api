@@ -71,8 +71,10 @@ async def _handle_ws_command(
     request_id = msg.get("request_id")
     bot_name = msg.get("bot_name")
 
-    SUPPORTED_COMMANDS = {"start_bot", "stop_bot", "configure_bot",
-                          "import_strategy", "get_history"}
+    SUPPORTED_COMMANDS = {
+        "start_bot", "stop_bot", "configure_bot", "import_strategy", "get_history",
+        "start_controller", "stop_controller", "update_controller_config"
+    }
 
     if command not in SUPPORTED_COMMANDS:
         await websocket.send_json({
@@ -122,6 +124,28 @@ async def _handle_ws_command(
 
         elif command == "get_history":
             result = await bots_orchestrator.get_bot_history(bot_name, **params)
+
+        elif command == "start_controller":
+            controller_id = params.get("controller_id") or msg.get("controller_id")
+            if not controller_id:
+                result = {"success": False, "message": "start_controller requires 'controller_id'"}
+            else:
+                result = await bots_orchestrator.start_controller(bot_name, controller_id)
+
+        elif command == "stop_controller":
+            controller_id = params.get("controller_id") or msg.get("controller_id")
+            if not controller_id:
+                result = {"success": False, "message": "stop_controller requires 'controller_id'"}
+            else:
+                result = await bots_orchestrator.stop_controller(bot_name, controller_id)
+
+        elif command == "update_controller_config":
+            controller_id = params.get("controller_id") or msg.get("controller_id")
+            config_params = params.get("params", {})
+            if not controller_id:
+                result = {"success": False, "message": "update_controller_config requires 'controller_id'"}
+            else:
+                result = await bots_orchestrator.set_controller_config(bot_name, controller_id, config_params)
 
         await websocket.send_json({
             "type": "command_result",

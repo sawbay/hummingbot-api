@@ -333,6 +333,32 @@ class BotsOrchestrator:
 
         return {"success": True, "data": response}
 
+    async def set_controller_config(
+        self, bot_name: str, controller_id: str, params: dict
+    ) -> dict:
+        """Hot-reload a single controller's config without restarting the bot."""
+        if bot_name not in self.active_bots:
+            return {"success": False, "message": f"Bot '{bot_name}' not found in active bots"}
+        payload = {"controller_id": controller_id, "params": params}
+        success = await self.mqtt_manager.publish_command(bot_name, "config", payload)
+        return {"success": success, "controller_id": controller_id}
+
+    async def stop_controller(self, bot_name: str, controller_id: str) -> dict:
+        """Stop a single controller inside a running bot."""
+        if bot_name not in self.active_bots:
+            return {"success": False, "message": f"Bot '{bot_name}' not found in active bots"}
+        payload = {"controller_id": controller_id, "action": "stop"}
+        success = await self.mqtt_manager.publish_command(bot_name, "controller", payload)
+        return {"success": success, "controller_id": controller_id}
+
+    async def start_controller(self, bot_name: str, controller_id: str) -> dict:
+        """Start a single controller inside a running bot."""
+        if bot_name not in self.active_bots:
+            return {"success": False, "message": f"Bot '{bot_name}' not found in active bots"}
+        payload = {"controller_id": controller_id, "action": "start"}
+        success = await self.mqtt_manager.publish_command(bot_name, "controller", payload)
+        return {"success": success, "controller_id": controller_id}
+
     @staticmethod
     def _should_skip_log_line(line: str) -> bool:
         return " - hummingbot.core.event.event_reporter - EVENT_LOG - " in line
