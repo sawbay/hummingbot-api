@@ -450,12 +450,12 @@ def validate_deployment_config(config: V2ControllerDeployment) -> list[str]:
 **Description**: Replace the 1-second `containers.list()` polling loop in `BotsOrchestrator.update_active_bots()` with a real-time Docker event stream using `docker.client.events()`. Keep the polling loop as a 30-second reconciliation fallback.
 
 **Subtasks**:
-- [ ] Add `_docker_event_listener()` async task to `BotsOrchestrator` that consumes `docker.client.events(filters={"type": "container"})` via `run_in_executor`.
-- [ ] Map Docker actions → internal handlers: `start` → `_on_container_started()`, `die`/`stop`/`kill` → `_on_container_stopped(exit_code)`.
-- [ ] On `_on_container_stopped` with non-zero exit code, call `mark_pending_bot_failed()` immediately and capture container logs.
-- [ ] Reduce `update_active_bots` sleep from `1.0s` to `30.0s` (reconciliation only).
-- [ ] Add restart logic for the event listener task if the Docker stream drops (reconnect with 5s delay).
-- [ ] Write unit tests mocking `docker.client.events()` for `start`, `die`, and `kill` actions.
+- [x] Add `_docker_event_listener()` async task to `BotsOrchestrator` that consumes `docker.client.events(filters={"type": "container"})` via `run_in_executor`.
+- [x] Map Docker actions → internal handlers: `start` → `_on_container_started()`, `die`/`stop`/`kill` → `_on_container_stopped(exit_code)`.
+- [x] On `_on_container_stopped` with non-zero exit code, call `mark_pending_bot_failed()` immediately and capture container logs.
+- [x] Reduce `update_active_bots` sleep from `1.0s` to `30.0s` (reconciliation only).
+- [x] Add restart logic for the event listener task if the Docker stream drops (reconnect with 5s delay).
+- [x] Write unit tests mocking `docker.client.events()` for `start`, `die`, and `kill` actions.
 
 **Acceptance Criteria**:
 - A container crash is reflected in `pending_bots` within **< 500ms** of the Docker `die` event.
@@ -469,12 +469,12 @@ def validate_deployment_config(config: V2ControllerDeployment) -> list[str]:
 **Description**: Add an exponential-backoff reconnect loop to `utils/mqtt_manager.py` so the API automatically recovers from transient EMQX broker restarts without requiring an API process restart.
 
 **Subtasks**:
-- [ ] Implement `_reconnect_loop()` async method with initial delay `1s`, doubling up to `60s` max.
-- [ ] Hook into the `on_disconnect` callback of the MQTT client to trigger `_reconnect_loop()`.
-- [ ] On reconnect success, re-subscribe to all previously registered bot topics (`hbot/+/hb`, etc.).
-- [ ] Expose `MQTTManager.is_connected() -> bool` as a public method (used by the health check).
-- [ ] Add a `connected_since: float` timestamp attribute, reset on each reconnect.
-- [ ] Log all reconnect attempts at `WARNING` level with the current retry delay.
+- [x] Implement `_reconnect_loop()` async method with initial delay `1s`, doubling up to `60s` max.
+- [x] Hook into the `on_disconnect` callback of the MQTT client to trigger `_reconnect_loop()`.
+- [x] On reconnect success, re-subscribe to all previously registered bot topics (`hbot/+/hb`, etc.).
+- [x] Expose `MQTTManager.is_connected() -> bool` as a public method (used by the health check).
+- [x] Add a `connected_since: float` timestamp attribute, reset on each reconnect.
+- [x] Log all reconnect attempts at `WARNING` level with the current retry delay.
 
 **Acceptance Criteria**:
 - Stopping and restarting the EMQX container while the API is running causes zero API restarts; the MQTT connection recovers automatically.
@@ -489,14 +489,14 @@ def validate_deployment_config(config: V2ControllerDeployment) -> list[str]:
 **Description**: Add a `/health` REST endpoint that checks DB, MQTT, and Docker connectivity, and wire it into the Docker `HEALTHCHECK` instruction so orchestrators can detect partial failures.
 
 **Subtasks**:
-- [ ] Create `routers/health.py` with a `GET /health` endpoint (no auth required).
-- [ ] Check DB: execute `SELECT 1` within `get_session_context()`; report `"ok"` or `"error: <msg>"`.
-- [ ] Check MQTT: call `bots_orchestrator.mqtt_manager.is_connected()`.
-- [ ] Check Docker: call `docker_service.is_docker_running()`.
-- [ ] Return `HTTP 200` when all checks pass; `HTTP 503` if any check fails.
-- [ ] Include `{"status": {"database": "ok", "mqtt": "ok", "docker": "ok"}, "uptime_seconds": ...}` in the response body.
-- [ ] Add `HEALTHCHECK` directive to `Dockerfile` targeting `GET /health`.
-- [ ] Register the router in `main.py` **without** `Depends(auth_user)`.
+- [x] Create `routers/health.py` with a `GET /health` endpoint (no auth required).
+- [x] Check DB: execute `SELECT 1` within `get_session_context()`; report `"ok"` or `"error: <msg>"`.
+- [x] Check MQTT: call `bots_orchestrator.mqtt_manager.is_connected()`.
+- [x] Check Docker: call `docker_service.is_docker_running()`.
+- [x] Return `HTTP 200` when all checks pass; `HTTP 503` if any check fails.
+- [x] Include `{"status": {"database": "ok", "mqtt": "ok", "docker": "ok"}, "uptime_seconds": ...}` in the response body.
+- [x] Add `HEALTHCHECK` directive to `Dockerfile` targeting `GET /health`.
+- [x] Register the router in `main.py` **without** `Depends(auth_user)`.
 
 **Acceptance Criteria**:
 - `curl localhost:8000/health` returns `200` with all checks `"ok"` when services are running.
@@ -510,13 +510,13 @@ def validate_deployment_config(config: V2ControllerDeployment) -> list[str]:
 **Description**: Before creating any Docker container, validate the deployment config against the local filesystem. Return a `400 Bad Request` with a specific error list if validation fails, rather than letting the container fail 60 seconds later.
 
 **Subtasks**:
-- [ ] Create `validate_deployment_config(config: V2ControllerDeployment) -> list[str]` in `routers/bot_orchestration.py`.
-- [ ] Validate: credentials profile directory exists under `bots/credentials/`.
-- [ ] Validate: `script_config` YAML file exists under `bots/conf/scripts/` (if provided).
-- [ ] Validate: all `controllers_config` entries referenced in the script YAML exist under `bots/conf/controllers/`.
-- [ ] Validate: Docker image is available locally; if not, surface a warning (not a hard error — user may rely on auto-pull).
-- [ ] Call validator at the top of both `deploy-v2-controllers` and `deploy-v2-script` handlers; raise `HTTPException(400)` if errors are found.
-- [ ] Add a test for each validation failure case.
+- [x] Create `validate_deployment_config(config: V2ControllerDeployment) -> list[str]` in `routers/bot_orchestration.py`.
+- [x] Validate: credentials profile directory exists under `bots/credentials/`.
+- [x] Validate: `script_config` YAML file exists under `bots/conf/scripts/` (if provided).
+- [x] Validate: all `controllers_config` entries referenced in the script YAML exist under `bots/conf/controllers/`.
+- [x] Validate: Docker image is available locally; if not, surface a warning (not a hard error — user may rely on auto-pull).
+- [x] Call validator at the top of both `deploy-v2-controllers` and `deploy-v2-script` handlers; raise `HTTPException(400)` if errors are found.
+- [x] Add a test for each validation failure case.
 
 **Acceptance Criteria**:
 - Deploying with a non-existent `credentials_profile` returns `400` immediately with message `"Credentials profile 'xyz' not found"`.
@@ -537,13 +537,13 @@ def validate_deployment_config(config: V2ControllerDeployment) -> list[str]:
 **Description**: Introduce an `asyncio.Queue`-based `EventBus` that `MQTTManager` publishes to on every incoming message. Push loops in `ExecutorWebSocketManager` subscribe to the bus and replace their `asyncio.sleep` wait with `await queue.get()`, reducing event latency from `update_interval` seconds to near-zero.
 
 **Subtasks**:
-- [ ] Create `utils/event_bus.py` with `EventBus` class and `BotEvent` dataclass (fields: `bot_name`, `event_type`, `payload`).
-- [ ] Instantiate `EventBus` in `main.py` `lifespan()` and store in `app.state.event_bus`.
-- [ ] Inject `EventBus` into `MQTTManager`; call `bus.publish(BotEvent(...))` in the `on_message` handler for `performance`, `hb`, `status_updates`, and `log` topics.
-- [ ] Refactor `_bot_status_push_loop`, `_performance_push_loop`, and `_logs_push_loop` in `ExecutorWebSocketManager` to use `await queue.get()` instead of `asyncio.sleep`.
-- [ ] Keep `asyncio.sleep(interval)` as a **heartbeat fallback** (send a `heartbeat` message if no event arrives within `update_interval`).
-- [ ] Ensure `EventBus.unsubscribe()` is called from `ExecutorWebSocketManager.remove_connection()` to prevent queue leaks.
-- [ ] Add a queue depth metric log (warn if queue depth > 100 for a subscriber).
+- [x] Create `utils/event_bus.py` with `EventBus` class and `BotEvent` dataclass (fields: `bot_name`, `event_type`, `payload`).
+- [x] Instantiate `EventBus` in `main.py` `lifespan()` and store in `app.state.event_bus`.
+- [x] Inject `EventBus` into `MQTTManager`; call `bus.publish(BotEvent(...))` in the `on_message` handler for `performance`, `hb`, `status_updates`, and `log` topics.
+- [x] Refactor `_bot_status_push_loop`, `_performance_push_loop`, and `_logs_push_loop` in `ExecutorWebSocketManager` to use `await queue.get()` instead of `asyncio.sleep`.
+- [x] Keep `asyncio.sleep(interval)` as a **heartbeat fallback** (send a `heartbeat` message if no event arrives within `update_interval`).
+- [x] Ensure `EventBus.unsubscribe()` is called from `ExecutorWebSocketManager.remove_connection()` to prevent queue leaks.
+- [x] Add a queue depth metric log (warn if queue depth > 100 for a subscriber).
 
 **Acceptance Criteria**:
 - A new MQTT performance message is pushed to all subscribed WS clients within **< 100ms** end-to-end.
@@ -558,13 +558,13 @@ def validate_deployment_config(config: V2ControllerDeployment) -> list[str]:
 **Description**: Add a `mode` field to WS push messages (`snapshot` on first send, `delta` on subsequent changes). Split the monolithic `all_bots_status` into narrower channels that the UI can subscribe to independently.
 
 **Subtasks**:
-- [ ] Add `mode: "snapshot" | "delta"` field to all WS push message schemas.
-- [ ] In each push loop, send `mode: "snapshot"` on first push; compute field-level diff on subsequent pushes and send `mode: "delta"` with only changed fields.
-- [ ] Add new subscription type `bot_heartbeat`: event-driven (MQTT LWT + `hb` topic), sends `{ bot_name, online: bool, timestamp }`.
-- [ ] Add new subscription type `bot_trades`: subscribes to fill/order events from MQTT and forwards each trade event individually.
-- [ ] Add `heartbeat` keepalive message: if no delta is sent within `update_interval * 3`, send `{"type": "heartbeat", "subscription_id": ..., "timestamp": ...}`.
-- [ ] Update `SUBSCRIPTION_TYPES` set and the `_get_push_fn` dispatch map in `executor_ws_manager.py`.
-- [ ] Update `docs/ws.md` with the new message schemas and channel list.
+- [x] Add `mode: "snapshot" | "delta"` field to all WS push message schemas.
+- [x] In each push loop, send `mode: "snapshot"` on first push; compute field-level diff on subsequent pushes and send `mode: "delta"` with only changed fields.
+- [x] Add new subscription type `bot_heartbeat`: event-driven (MQTT LWT + `hb` topic), sends `{ bot_name, online: bool, timestamp }`.
+- [x] Add new subscription type `bot_trades`: subscribes to fill/order events from MQTT and forwards each trade event individually.
+- [x] Add `heartbeat` keepalive message: if no delta is sent within `update_interval * 3`, send `{"type": "heartbeat", "subscription_id": ..., "timestamp": ...}`.
+- [x] Update `SUBSCRIPTION_TYPES` set and the `_get_push_fn` dispatch map in `executor_ws_manager.py`.
+- [x] Update `docs/ws.md` with the new message schemas and channel list.
 
 **Acceptance Criteria**:
 - The first message after `subscribe` always contains `"mode": "snapshot"` with full data.
@@ -579,13 +579,13 @@ def validate_deployment_config(config: V2ControllerDeployment) -> list[str]:
 **Description**: Extend the existing WS JSON dispatch in `routers/websocket.py` to accept `"action": "command"` messages. Route commands to `BotsOrchestrator` methods and return async acks and results over the same WS connection.
 
 **Subtasks**:
-- [ ] Add `"command"` branch to the WS message dispatch in `routers/websocket.py` alongside existing `"subscribe"` and `"unsubscribe"`.
-- [ ] Define supported commands: `start_bot`, `stop_bot`, `configure_bot`, `import_strategy`.
-- [ ] For each command, immediately send a `command_ack` response (`status: "sent"` or `status: "error"`).
-- [ ] For commands that return MQTT responses (e.g., `history`), use `publish_command_and_wait()` and send a `command_result` message asynchronously once the response arrives.
-- [ ] Add `request_id` field threading: client sends `request_id`, all ack/result messages echo it back for correlation.
-- [ ] Add WS auth check at command dispatch (reject if connection is unauthenticated).
-- [ ] Document the command protocol in `docs/ws.md` with request/response examples.
+- [x] Add `"command"` branch to the WS message dispatch in `routers/websocket.py` alongside existing `"subscribe"` and `"unsubscribe"`.
+- [x] Define supported commands: `start_bot`, `stop_bot`, `configure_bot`, `import_strategy`.
+- [x] For each command, immediately send a `command_ack` response (`status: "sent"` or `status: "error"`).
+- [x] For commands that return MQTT responses (e.g., `history`), use `publish_command_and_wait()` and send a `command_result` message asynchronously once the response arrives.
+- [x] Add `request_id` field threading: client sends `request_id`, all ack/result messages echo it back for correlation.
+- [x] Add WS auth check at command dispatch (reject if connection is unauthenticated).
+- [x] Document the command protocol in `docs/ws.md` with request/response examples.
 
 **Acceptance Criteria**:
 - Sending `{"action": "command", "command": "stop_bot", "bot_name": "bot_001", "request_id": "r1"}` over WS receives a `command_ack` within **< 50ms**.
@@ -600,15 +600,15 @@ def validate_deployment_config(config: V2ControllerDeployment) -> list[str]:
 **Description**: Add REST and WS endpoints to start, stop, and hot-reload individual controllers inside a running bot without restarting the entire bot process. Uses the MQTT `config` and `controller` topics supported by `v2_with_controllers.py`.
 
 **Subtasks**:
-- [ ] Add `set_controller_config(bot_name, controller_id, params)` to `BotsOrchestrator`.
-- [ ] Add `stop_controller(bot_name, controller_id)` and `start_controller(bot_name, controller_id)` to `BotsOrchestrator`.
-- [ ] Add REST endpoints to `routers/bot_orchestration.py`:
+- [x] Add `set_controller_config(bot_name, controller_id, params)` to `BotsOrchestrator`.
+- [x] Add `stop_controller(bot_name, controller_id)` and `start_controller(bot_name, controller_id)` to `BotsOrchestrator`.
+- [x] Add REST endpoints to `routers/bot_orchestration.py`:
   - `POST /bot-orchestration/{bot_name}/controllers/{controller_id}/start`
   - `POST /bot-orchestration/{bot_name}/controllers/{controller_id}/stop`
   - `PUT  /bot-orchestration/{bot_name}/controllers/{controller_id}/config`
-- [ ] Add WS command handlers for `enable_controller`, `disable_controller`, and `update_controller_config`.
-- [ ] Verify the MQTT payload format accepted by Hummingbot's `v2_with_controllers.py` for each action.
-- [ ] Write manual test plan in `docs/test/` covering each controller action.
+- [x] Add WS command handlers for `enable_controller`, `disable_controller`, and `update_controller_config`.
+- [x] Verify the MQTT payload format accepted by Hummingbot's `v2_with_controllers.py` for each action.
+- [x] Write manual test plan in `docs/test/controller_management_manual_test.md` covering each controller action.
 
 **Acceptance Criteria**:
 - Calling `PUT /bot-orchestration/bot_001/controllers/ctrl_A/config` with new params updates the controller live; the bot does **not** restart.

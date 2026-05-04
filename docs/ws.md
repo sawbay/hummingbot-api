@@ -525,6 +525,18 @@ Imports a strategy configuration file.
 #### `get_history`
 Fetches trading history from the bot.
 - **Params:** `days`, `verbose`, `precision`
+
+#### `start_controller`
+Starts a single controller inside the bot.
+- **Params:** `controller_id`
+
+#### `stop_controller`
+Stops a single controller inside the bot.
+- **Params:** `controller_id`
+
+#### `update_controller_config`
+Updates a single controller's configuration.
+- **Params:** `controller_id`, `params` (dict of config keys/values)
 ```
 
 ---
