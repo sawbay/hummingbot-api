@@ -37,6 +37,8 @@ SUBSCRIPTION_TYPES = {
     "bot_status",
     "all_bots_status",
     "bot_deployment",  # tracks a single bot from deploy → running/failed
+    "bot_heartbeat",
+    "bot_trades",
 }
 
 
@@ -66,6 +68,7 @@ class ExecutorSubscription:
 
     # Change detection
     last_sent_hash: Optional[str] = None
+    last_sent_data: Optional[Any] = None
     # For logs: track count to send only new entries
     last_log_count: int = 0
 
@@ -74,6 +77,14 @@ def _compute_hash(data: Any) -> str:
     """MD5 hash of JSON-serialized data for change detection."""
     raw = json.dumps(data, sort_keys=True, default=str)
     return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _compute_delta(old: Any, new: Any) -> Any:
+    """Return only the top-level keys that changed between old and new dicts.
+    If either is not a dict, return new in full."""
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return new
+    return {k: v for k, v in new.items() if old.get(k) != v}
 
 
 def _clamp_interval(interval: Optional[float]) -> float:
@@ -196,6 +207,22 @@ class ExecutorWebSocketManager:
             sub.bot_name = instance_name  # reuse bot_name field for instance_name
             sub.sub_id = f"bot_deployment_{instance_name}"
 
+        elif sub_type == "bot_heartbeat":
+            bot_name = msg.get("bot_name")
+            if not bot_name:
+                await self._send_error(websocket, "bot_heartbeat requires 'bot_name'")
+                return
+            sub.bot_name = bot_name
+            sub.sub_id = f"bot_heartbeat_{bot_name}"
+
+        elif sub_type == "bot_trades":
+            bot_name = msg.get("bot_name")
+            if not bot_name:
+                await self._send_error(websocket, "bot_trades requires 'bot_name'")
+                return
+            sub.bot_name = bot_name
+            sub.sub_id = f"bot_trades_{bot_name}"
+
         # Cancel existing subscription with same ID for this connection
         conn_subs = self._subscriptions.setdefault(conn_id, {})
         if sub.sub_id in conn_subs:
@@ -270,6 +297,8 @@ class ExecutorWebSocketManager:
             "bot_status": self._bot_status_push_loop,
             "all_bots_status": self._all_bots_status_push_loop,
             "bot_deployment": self._bot_deployment_push_loop,
+            "bot_heartbeat": self._bot_heartbeat_push_loop,
+            "bot_trades": self._bot_trades_push_loop,
         }[sub_type]
 
     # ------------------------------------------------------------------
@@ -280,6 +309,7 @@ class ExecutorWebSocketManager:
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
     ) -> None:
         """Poll get_executors() with filters and push on change."""
+        last_push_time = time.time()
         try:
             while True:
                 try:
@@ -294,14 +324,26 @@ class ExecutorWebSocketManager:
                     )
                     h = _compute_hash(executors)
                     if h != sub.last_sent_hash:
+                        mode = "snapshot" if sub.last_sent_data is None else "delta"
+                        data_to_send = executors if mode == "snapshot" else _compute_delta(sub.last_sent_data, executors)
                         sub.last_sent_hash = h
+                        sub.last_sent_data = executors
                         await websocket.send_json({
                             "type": "executors",
                             "subscription_id": sub.sub_id,
-                            "data": executors,
+                            "mode": mode,
+                            "data": data_to_send,
                             "total_count": len(executors),
                             "timestamp": time.time(),
                         })
+                        last_push_time = time.time()
+                    elif time.time() - last_push_time > sub.update_interval * 3:
+                        await websocket.send_json({
+                            "type": "heartbeat",
+                            "subscription_id": sub.sub_id,
+                            "timestamp": time.time(),
+                        })
+                        last_push_time = time.time()
                 except Exception as e:
                     logger.error(f"[WS-Exec] executors push error: {e}", exc_info=True)
                 await asyncio.sleep(sub.update_interval)
@@ -312,19 +354,32 @@ class ExecutorWebSocketManager:
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
     ) -> None:
         """Poll get_executor() for a single executor and push on change."""
+        last_push_time = time.time()
         try:
             while True:
                 try:
                     data = await self._executor_service.get_executor(sub.executor_id)
                     h = _compute_hash(data)
                     if h != sub.last_sent_hash:
+                        mode = "snapshot" if sub.last_sent_data is None else "delta"
+                        data_to_send = data if mode == "snapshot" else _compute_delta(sub.last_sent_data, data)
                         sub.last_sent_hash = h
+                        sub.last_sent_data = data
                         await websocket.send_json({
                             "type": "executor_detail",
                             "subscription_id": sub.sub_id,
-                            "data": data,
+                            "mode": mode,
+                            "data": data_to_send,
                             "timestamp": time.time(),
                         })
+                        last_push_time = time.time()
+                    elif time.time() - last_push_time > sub.update_interval * 3:
+                        await websocket.send_json({
+                            "type": "heartbeat",
+                            "subscription_id": sub.sub_id,
+                            "timestamp": time.time(),
+                        })
+                        last_push_time = time.time()
                 except Exception as e:
                     logger.error(f"[WS-Exec] executor_detail push error: {e}", exc_info=True)
                 await asyncio.sleep(sub.update_interval)
@@ -335,19 +390,32 @@ class ExecutorWebSocketManager:
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
     ) -> None:
         """Poll get_summary() and push on change."""
+        last_push_time = time.time()
         try:
             while True:
                 try:
                     data = self._executor_service.get_summary()
                     h = _compute_hash(data)
                     if h != sub.last_sent_hash:
+                        mode = "snapshot" if sub.last_sent_data is None else "delta"
+                        data_to_send = data if mode == "snapshot" else _compute_delta(sub.last_sent_data, data)
                         sub.last_sent_hash = h
+                        sub.last_sent_data = data
                         await websocket.send_json({
                             "type": "executor_summary",
                             "subscription_id": sub.sub_id,
-                            "data": data,
+                            "mode": mode,
+                            "data": data_to_send,
                             "timestamp": time.time(),
                         })
+                        last_push_time = time.time()
+                    elif time.time() - last_push_time > sub.update_interval * 3:
+                        await websocket.send_json({
+                            "type": "heartbeat",
+                            "subscription_id": sub.sub_id,
+                            "timestamp": time.time(),
+                        })
+                        last_push_time = time.time()
                 except Exception as e:
                     logger.error(f"[WS-Exec] summary push error: {e}", exc_info=True)
                 await asyncio.sleep(sub.update_interval)
@@ -358,6 +426,7 @@ class ExecutorWebSocketManager:
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
     ) -> None:
         """Poll get_performance_report() and push on change."""
+        last_push_time = time.time()
         subscriber_id = f"{conn_id}-{sub.sub_id}"
         queue = self._event_bus.subscribe(subscriber_id) if self._event_bus else None
         try:
@@ -377,13 +446,25 @@ class ExecutorWebSocketManager:
                     )
                     h = _compute_hash(data)
                     if h != sub.last_sent_hash:
+                        mode = "snapshot" if sub.last_sent_data is None else "delta"
+                        data_to_send = data if mode == "snapshot" else _compute_delta(sub.last_sent_data, data)
                         sub.last_sent_hash = h
+                        sub.last_sent_data = data
                         await websocket.send_json({
                             "type": "performance",
                             "subscription_id": sub.sub_id,
-                            "data": data,
+                            "mode": mode,
+                            "data": data_to_send,
                             "timestamp": time.time(),
                         })
+                        last_push_time = time.time()
+                    elif time.time() - last_push_time > sub.update_interval * 3:
+                        await websocket.send_json({
+                            "type": "heartbeat",
+                            "subscription_id": sub.sub_id,
+                            "timestamp": time.time(),
+                        })
+                        last_push_time = time.time()
                 except Exception as e:
                     logger.error(f"[WS-Exec] performance push error: {e}", exc_info=True)
 
@@ -399,6 +480,7 @@ class ExecutorWebSocketManager:
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
     ) -> None:
         """Poll get_positions_held() with unrealized PnL and push on change."""
+        last_push_time = time.time()
         try:
             while True:
                 try:
@@ -454,13 +536,25 @@ class ExecutorWebSocketManager:
 
                     h = _compute_hash(payload)
                     if h != sub.last_sent_hash:
+                        mode = "snapshot" if sub.last_sent_data is None else "delta"
+                        data_to_send = payload if mode == "snapshot" else _compute_delta(sub.last_sent_data, payload)
                         sub.last_sent_hash = h
+                        sub.last_sent_data = payload
                         await websocket.send_json({
                             "type": "positions",
                             "subscription_id": sub.sub_id,
-                            "data": payload,
+                            "mode": mode,
+                            "data": data_to_send,
                             "timestamp": time.time(),
                         })
+                        last_push_time = time.time()
+                    elif time.time() - last_push_time > sub.update_interval * 3:
+                        await websocket.send_json({
+                            "type": "heartbeat",
+                            "subscription_id": sub.sub_id,
+                            "timestamp": time.time(),
+                        })
+                        last_push_time = time.time()
                 except Exception as e:
                     logger.error(f"[WS-Exec] positions push error: {e}", exc_info=True)
                 await asyncio.sleep(sub.update_interval)
@@ -515,6 +609,7 @@ class ExecutorWebSocketManager:
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
     ) -> None:
         """Poll get_bot_status() for a single bot and push on change (no logs)."""
+        last_push_time = time.time()
         subscriber_id = f"{conn_id}-{sub.sub_id}"
         queue = self._event_bus.subscribe(subscriber_id) if self._event_bus else None
         try:
@@ -538,13 +633,25 @@ class ExecutorWebSocketManager:
                     }
                     h = _compute_hash(payload)
                     if h != sub.last_sent_hash:
+                        mode = "snapshot" if sub.last_sent_data is None else "delta"
+                        data_to_send = payload if mode == "snapshot" else _compute_delta(sub.last_sent_data, payload)
                         sub.last_sent_hash = h
+                        sub.last_sent_data = payload
                         await websocket.send_json({
                             "type": "bot_status",
                             "subscription_id": sub.sub_id,
-                            "data": payload,
+                            "mode": mode,
+                            "data": data_to_send,
                             "timestamp": time.time(),
                         })
+                        last_push_time = time.time()
+                    elif time.time() - last_push_time > sub.update_interval * 3:
+                        await websocket.send_json({
+                            "type": "heartbeat",
+                            "subscription_id": sub.sub_id,
+                            "timestamp": time.time(),
+                        })
+                        last_push_time = time.time()
                 except Exception as e:
                     logger.error(f"[WS-Exec] bot_status push error: {e}", exc_info=True)
 
@@ -560,6 +667,7 @@ class ExecutorWebSocketManager:
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
     ) -> None:
         """Poll get_all_bots_status() and push on change (no logs)."""
+        last_push_time = time.time()
         try:
             while True:
                 try:
@@ -575,19 +683,123 @@ class ExecutorWebSocketManager:
                         }
                     h = _compute_hash(payload)
                     if h != sub.last_sent_hash:
+                        mode = "snapshot" if sub.last_sent_data is None else "delta"
+                        data_to_send = payload if mode == "snapshot" else _compute_delta(sub.last_sent_data, payload)
                         sub.last_sent_hash = h
+                        sub.last_sent_data = payload
                         await websocket.send_json({
                             "type": "all_bots_status",
                             "subscription_id": sub.sub_id,
-                            "data": payload,
+                            "mode": mode,
+                            "data": data_to_send,
                             "bot_count": len(payload),
                             "timestamp": time.time(),
                         })
+                        last_push_time = time.time()
+                    elif time.time() - last_push_time > sub.update_interval * 3:
+                        await websocket.send_json({
+                            "type": "heartbeat",
+                            "subscription_id": sub.sub_id,
+                            "timestamp": time.time(),
+                        })
+                        last_push_time = time.time()
                 except Exception as e:
                     logger.error(f"[WS-Exec] all_bots_status push error: {e}", exc_info=True)
                 await asyncio.sleep(sub.update_interval)
         except asyncio.CancelledError:
             pass
+
+    async def _bot_heartbeat_push_loop(
+        self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
+    ) -> None:
+        """Push online/offline status for a bot."""
+        last_push_time = time.time()
+        subscriber_id = f"{conn_id}-{sub.sub_id}"
+        queue = self._event_bus.subscribe(subscriber_id) if self._event_bus else None
+        try:
+            while True:
+                if queue:
+                    try:
+                        await asyncio.wait_for(queue.get(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(sub.update_interval)
+
+                try:
+                    discovered_bots = self._bots_orchestrator.mqtt_manager.get_discovered_bots(timeout_seconds=30)
+                    online = sub.bot_name in discovered_bots
+                    data = {"bot_name": sub.bot_name, "online": online}
+                    
+                    h = _compute_hash(data)
+                    if h != sub.last_sent_hash:
+                        mode = "snapshot" if sub.last_sent_data is None else "delta"
+                        data_to_send = data if mode == "snapshot" else _compute_delta(sub.last_sent_data, data)
+                        sub.last_sent_hash = h
+                        sub.last_sent_data = data
+                        await websocket.send_json({
+                            "type": "bot_heartbeat",
+                            "subscription_id": sub.sub_id,
+                            "mode": mode,
+                            "data": data_to_send,
+                            "timestamp": time.time(),
+                        })
+                        last_push_time = time.time()
+                    elif time.time() - last_push_time > sub.update_interval * 3:
+                        await websocket.send_json({
+                            "type": "heartbeat",
+                            "subscription_id": sub.sub_id,
+                            "timestamp": time.time(),
+                        })
+                        last_push_time = time.time()
+                except Exception as e:
+                    logger.error(f"[WS-Exec] bot_heartbeat push error: {e}", exc_info=True)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if queue and self._event_bus:
+                self._event_bus.unsubscribe(subscriber_id)
+
+    async def _bot_trades_push_loop(
+        self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
+    ) -> None:
+        """Push trade events for a bot."""
+        subscriber_id = f"{conn_id}-{sub.sub_id}"
+        queue = self._event_bus.subscribe(subscriber_id) if self._event_bus else None
+        
+        # Initial snapshot (empty for events)
+        await websocket.send_json({
+            "type": "bot_trades",
+            "subscription_id": sub.sub_id,
+            "mode": "snapshot",
+            "data": [],
+            "timestamp": time.time(),
+        })
+        
+        if not queue:
+            try:
+                while True:
+                    await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                pass
+            return
+
+        try:
+            while True:
+                event = await queue.get()
+                if event.bot_name == sub.bot_name and event.event_type == "trade":
+                    await websocket.send_json({
+                        "type": "bot_trades",
+                        "subscription_id": sub.sub_id,
+                        "mode": "event",
+                        "data": event.payload,
+                        "timestamp": time.time(),
+                    })
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._event_bus:
+                self._event_bus.unsubscribe(subscriber_id)
 
     async def _bot_deployment_push_loop(
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription

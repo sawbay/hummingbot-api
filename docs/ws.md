@@ -48,6 +48,24 @@ Data is only pushed when the payload changes (hash-based change detection).
 
 ---
 
+## Message Modes
+
+To optimize bandwidth, most `/ws/executors` channels support delta-based updates.
+
+| Mode | Description |
+|---|---|
+| `snapshot` | Sent as the first message of a subscription. Contains the full data state. |
+| `delta` | Sent for subsequent updates. Contains only the top-level keys that have changed. |
+| `event` | Sent for one-off occurrences (e.g., a trade). Not a state replacement. |
+| `heartbeat` | Sent if no data has changed within `update_interval * 3`. Keeps the connection alive. |
+
+**Example Heartbeat:**
+```json
+{ "type": "heartbeat", "subscription_id": "...", "timestamp": 1234567890.0 }
+```
+
+---
+
 ## `/ws/market-data`
 
 Market data streaming: candles, order books, and trades.
