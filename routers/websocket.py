@@ -60,6 +60,88 @@ def _authenticate_websocket(websocket: WebSocket) -> bool:
     return correct_user and correct_pass
 
 
+
+async def _handle_ws_command(
+    websocket: WebSocket,
+    msg: dict,
+    bots_orchestrator,  # BotsOrchestrator instance
+) -> None:
+    """Dispatch a bot command received over WebSocket."""
+    command = msg.get("command")
+    request_id = msg.get("request_id")
+    bot_name = msg.get("bot_name")
+
+    SUPPORTED_COMMANDS = {"start_bot", "stop_bot", "configure_bot",
+                          "import_strategy", "get_history"}
+
+    if command not in SUPPORTED_COMMANDS:
+        await websocket.send_json({
+            "type": "error",
+            "message": f"Unknown command: {command}. Supported: {sorted(SUPPORTED_COMMANDS)}",
+            "request_id": request_id,
+        })
+        return
+
+    if not bot_name:
+        await websocket.send_json({
+            "type": "error",
+            "message": "Command requires 'bot_name'",
+            "request_id": request_id,
+        })
+        return
+
+    # Immediately acknowledge receipt
+    await websocket.send_json({
+        "type": "command_ack",
+        "request_id": request_id,
+        "command": command,
+        "bot_name": bot_name,
+        "status": "sent",
+        "message": f"Command '{command}' dispatched to {bot_name}",
+    })
+
+    # Execute the command
+    try:
+        params = msg.get("params", {})
+
+        if command == "start_bot":
+            result = await bots_orchestrator.start_bot(bot_name, **params)
+
+        elif command == "stop_bot":
+            result = await bots_orchestrator.stop_bot(bot_name, **params)
+
+        elif command == "configure_bot":
+            result = await bots_orchestrator.configure_bot(bot_name, params=params)
+
+        elif command == "import_strategy":
+            strategy = params.get("strategy") or msg.get("strategy")
+            if not strategy:
+                result = {"success": False, "message": "import_strategy requires 'strategy'"}
+            else:
+                result = await bots_orchestrator.import_strategy_for_bot(bot_name, strategy)
+
+        elif command == "get_history":
+            result = await bots_orchestrator.get_bot_history(bot_name, **params)
+
+        await websocket.send_json({
+            "type": "command_result",
+            "request_id": request_id,
+            "command": command,
+            "bot_name": bot_name,
+            "result": result,
+        })
+
+    except Exception as e:
+        logger.error(f"[WS-Cmd] Error executing {command} for {bot_name}: {e}", exc_info=True)
+        await websocket.send_json({
+            "type": "command_result",
+            "request_id": request_id,
+            "command": command,
+            "bot_name": bot_name,
+            "result": {"success": False, "message": str(e)},
+        })
+
+
 async def _heartbeat_loop(websocket: WebSocket) -> None:
     """Send periodic heartbeat pings."""
     try:
@@ -230,11 +312,18 @@ async def executors_websocket(websocket: WebSocket) -> None:
                     "type": "pong",
                     "timestamp": time.time(),
                 })
+            elif action == "command":
+                # Commands are fire-and-forget; run in background task to not block receive loop
+                bots_orchestrator = websocket.app.state.bots_orchestrator
+                asyncio.create_task(
+                    _handle_ws_command(websocket, raw, bots_orchestrator),
+                    name=f"ws-cmd-{conn_id}-{raw.get('request_id', 'unknown')}"
+                )
             else:
                 await websocket.send_json({
                     "type": "error",
                     "message": f"Unknown action: {action}. "
-                               f"Valid actions: subscribe, unsubscribe, ping",
+                               f"Valid actions: subscribe, unsubscribe, ping, command",
                 })
     except WebSocketDisconnect:
         logger.info(f"[WS-Exec] Client disconnected: {conn_id}")

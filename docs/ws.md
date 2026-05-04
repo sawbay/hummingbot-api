@@ -31,6 +31,7 @@ Every message is a JSON object with an `action` field.
 { "action": "subscribe",   "type": "<sub_type>", ...params }
 { "action": "unsubscribe", "subscription_id": "<id>" }
 { "action": "ping" }
+{ "action": "command",     "command": "<cmd>", "bot_name": "...", "params": {...} }
 ```
 
 ### Responses (server → client)
@@ -443,8 +444,87 @@ WS connect → /ws/executors
   ← { "type": "bot_deployment", "data": { "overall_status": "running" } }
   ← { "type": "bot_deployment_resolved", "final_status": "running" }
 
-→ { "action": "subscribe", "type": "bot_status",
+→ { "action": "subscribe",   "type": "bot_status",
     "bot_name": "my-bot-20260502-090000" }   ← switch to ongoing monitoring
+
+---
+
+## Bot Commands via WebSocket
+
+You can send commands to running bots directly over the `/ws/executors` WebSocket connection. This is an asynchronous RPC-style mechanism: you send a command, receive an immediate acknowledgment (`command_ack`), and then receive the final result (`command_result`) once the operation completes.
+
+### Message Schema
+
+#### Request (client → server)
+
+```json
+{
+  "action": "command",
+  "command": "start_bot",
+  "bot_name": "my-bot-001",
+  "params": { "script": "triangular_arbitrage.py" },
+  "request_id": "req_123"
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `action` | ✅ | Must be `"command"` |
+| `command` | ✅ | One of: `start_bot`, `stop_bot`, `configure_bot`, `import_strategy`, `get_history` |
+| `bot_name` | ✅ | The name of the target bot |
+| `params` | ❌ | Dictionary of parameters for the command |
+| `request_id` | ❌ | Client-provided ID to track the response (recommended) |
+
+#### Acknowledgment (server → client)
+
+Sent immediately after the command is validated and dispatched.
+
+```json
+{
+  "type": "command_ack",
+  "request_id": "req_123",
+  "command": "start_bot",
+  "bot_name": "my-bot-001",
+  "status": "sent",
+  "message": "Command 'start_bot' dispatched to my-bot-001"
+}
+```
+
+#### Result (server → client)
+
+Sent once the bot or orchestrator completes the command.
+
+```json
+{
+  "type": "command_result",
+  "request_id": "req_123",
+  "command": "start_bot",
+  "bot_name": "my-bot-001",
+  "result": { "success": true }
+}
+```
+
+### Supported Commands
+
+#### `start_bot`
+Starts a script or controller on the bot.
+- **Params:** `script`, `conf`, `log_level`, `is_quickstart`
+
+#### `stop_bot`
+Stops the running script/controller.
+- **Params:** `skip_order_cancellation`
+
+#### `configure_bot`
+Updates bot configuration parameters.
+- **Params:** `params` (dict of config keys/values)
+
+#### `import_strategy`
+Imports a strategy configuration file.
+- **Params:** `strategy` (filename)
+
+#### `get_history`
+Fetches trading history from the bot.
+- **Params:** `days`, `verbose`, `precision`
 ```
 
 ---
