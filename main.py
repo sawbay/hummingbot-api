@@ -1,5 +1,6 @@
 import logging
 import secrets
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated
 from urllib.parse import urlparse
@@ -52,6 +53,7 @@ from routers import (  # noqa: E402
     gateway,
     gateway_clmm,
     gateway_swap,
+    health,
     market_data,
     portfolio,
     rate_oracle,
@@ -279,6 +281,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.executor_ws_manager = executor_ws_manager
 
+    app.state.start_time = time.time()
     logging.info("All services started successfully")
 
     yield
@@ -317,6 +320,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Health check endpoint (no authentication required)
+app.include_router(health.router)
 
 
 @app.exception_handler(RequestValidationError)

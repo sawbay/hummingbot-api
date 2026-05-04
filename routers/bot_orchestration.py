@@ -2,6 +2,9 @@ import asyncio
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
+
+import yaml
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
@@ -26,6 +29,63 @@ router = APIRouter(tags=["Bot Orchestration"], prefix="/bot-orchestration")
 _DEPLOY_HEALTH_CHECK_TIMEOUT = 60
 # Interval (seconds) between container status polls during the health check.
 _DEPLOY_HEALTH_CHECK_INTERVAL = 3
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight validation
+# ---------------------------------------------------------------------------
+
+def validate_deployment_config(config: "V2ControllerDeployment") -> list[str]:
+    """
+    Synchronous pre-flight validator that checks all filesystem paths referenced
+    by a deployment config before any Docker SDK call is made.
+
+    Returns a list of error strings.  An empty list means the config is valid.
+
+    Checks performed (in order):
+    1. Credentials profile directory exists under ``bots/credentials/``.
+    2. If ``script_config`` is set, the YAML file exists under
+       ``bots/conf/scripts/`` and every ``controllers_config`` entry it
+       references exists under ``bots/conf/controllers/``.
+    """
+    errors: list[str] = []
+
+    # ── 1. Credentials profile ────────────────────────────────────────────────
+    creds_dir = Path("bots/credentials") / config.credentials_profile
+    if not creds_dir.is_dir():
+        errors.append(
+            f"Credentials profile '{config.credentials_profile}' not found at "
+            f"bots/credentials/{config.credentials_profile}"
+        )
+
+    # ── 2. Script config (optional) ───────────────────────────────────────────
+    if config.script_config:
+        script_path = Path("bots/conf/scripts") / config.script_config
+        if not script_path.exists():
+            errors.append(
+                f"Script config '{config.script_config}' not found at "
+                f"bots/conf/scripts/{config.script_config}"
+            )
+        else:
+            # Parse YAML and validate every controller referenced inside it
+            try:
+                with open(script_path) as fh:
+                    script_data = yaml.safe_load(fh) or {}
+
+                controller_entries = script_data.get("controllers_config", [])
+                for entry in controller_entries:
+                    ctrl_path = Path("bots/conf/controllers") / entry
+                    if not ctrl_path.exists():
+                        errors.append(
+                            f"Controller config '{entry}' referenced in script config "
+                            f"not found at bots/conf/controllers/{entry}"
+                        )
+            except Exception as e:
+                errors.append(
+                    f"Failed to parse script config '{config.script_config}': {e}"
+                )
+
+    return errors
 
 
 @router.get("/status")
@@ -53,12 +113,12 @@ def get_mqtt_status(bots_manager: BotsOrchestrator = Depends(get_bots_orchestrat
     Returns:
         Dictionary with MQTT connection status, discovered bots, and broker information
     """
-    mqtt_connected = bots_manager.mqtt_manager.is_connected
+    mqtt_connected = bots_manager.mqtt_manager.is_connected()
     discovered_bots = bots_manager.mqtt_manager.get_discovered_bots()
     active_bots = list(bots_manager.active_bots.keys())
 
     # Check client state
-    client_state = "connected" if bots_manager.mqtt_manager.is_connected else "disconnected"
+    client_state = "connected" if bots_manager.mqtt_manager.is_connected() else "disconnected"
 
     return {
         "status": "success",
@@ -707,6 +767,14 @@ async def deploy_v2_controllers(
     Raises:
         HTTPException: 500 if deployment fails
     """
+    # Pre-flight validation — fast, synchronous, no Docker calls
+    errors = validate_deployment_config(deployment)
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail={"errors": errors, "message": "Deployment config validation failed"}
+        )
+
     try:
         # Generate unique script config filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -819,6 +887,14 @@ async def deploy_v2_script(
     Raises:
         HTTPException: 500 if deployment fails
     """
+    # Pre-flight validation — fast, synchronous, no Docker calls
+    errors = validate_deployment_config(deployment)
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail={"errors": errors, "message": "Deployment config validation failed"}
+        )
+
     try:
         # Generate unique instance name with timestamp
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

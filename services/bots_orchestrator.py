@@ -82,6 +82,9 @@ class BotsOrchestrator:
         logger.info("Starting MQTT manager...")
         await self.mqtt_manager.start()
 
+        # Start the Docker event listener task
+        asyncio.create_task(self._docker_event_listener())
+
         # Then start the update loop
         await self.update_active_bots()
 
@@ -94,7 +97,7 @@ class BotsOrchestrator:
         # Stop MQTT manager asynchronously
         asyncio.create_task(self.mqtt_manager.stop())
 
-    async def update_active_bots(self, sleep_time=1.0):
+    async def update_active_bots(self, sleep_time=30.0):
         """Monitor and update active bots list using both Docker and MQTT discovery."""
         while True:
             try:
@@ -130,6 +133,80 @@ class BotsOrchestrator:
                 logger.error(f"Error in update_active_bots: {e}", exc_info=True)
 
             await asyncio.sleep(sleep_time)
+
+    async def _docker_event_listener(self):
+        """Listen to Docker events in real-time."""
+        while True:
+            try:
+                loop = asyncio.get_event_loop()
+                # Run the blocking events() call in a separate thread/executor
+                event_stream = await loop.run_in_executor(
+                    None,
+                    lambda: self.docker_client.events(decode=True, filters={"type": "container"})
+                )
+
+                def get_next_event(stream):
+                    try:
+                        return next(stream)
+                    except StopIteration:
+                        return None
+
+                while True:
+                    event = await loop.run_in_executor(None, get_next_event, event_stream)
+                    if event is None:
+                        break
+
+                    action = event.get("action")
+                    actor = event.get("Actor", {})
+                    attributes = actor.get("Attributes", {})
+                    name = attributes.get("name")
+
+                    if not name:
+                        continue
+
+                    if action == "start":
+                        await self._on_container_started(name)
+                    elif action in ("die", "stop", "kill"):
+                        exit_code = int(attributes.get("exitCode", 0))
+                        await self._on_container_stopped(name, exit_code)
+            except Exception as e:
+                logger.error(f"Docker event listener error: {e}. Restarting in 5s...", exc_info=True)
+                await asyncio.sleep(5)
+
+    async def _on_container_started(self, name: str):
+        """Handle container start event."""
+        try:
+            if self.is_bot_stopping(name):
+                return
+
+            loop = asyncio.get_event_loop()
+            container = await loop.run_in_executor(None, self.docker_client.containers.get, name)
+            if self.hummingbot_containers_fiter(container):
+                if name not in self.active_bots:
+                    self.active_bots[name] = {
+                        "bot_name": name,
+                        "status": "connected",
+                        "source": "docker",
+                    }
+                    await self.mqtt_manager.subscribe_to_bot(name)
+                # Promote from pending if it was waiting
+                self.pending_bots.pop(name, None)
+        except Exception as e:
+            # Container might have disappeared quickly
+            logger.debug(f"Could not process start event for {name}: {e}")
+
+    async def _on_container_stopped(self, name: str, exit_code: int):
+        """Handle container stop/die event."""
+        try:
+            if name in self.active_bots:
+                del self.active_bots[name]
+
+            if exit_code != 0 and name in self.pending_bots:
+                self.mark_pending_bot_failed(name, f"Container exited with code {exit_code}")
+
+            self.mqtt_manager.clear_bot_data(name)
+        except Exception as e:
+            logger.error(f"Error in _on_container_stopped for {name}: {e}", exc_info=True)
 
     # ---------------------------------------------------------------------------
     # Pending bot registry
