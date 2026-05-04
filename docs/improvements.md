@@ -437,11 +437,231 @@ def validate_deployment_config(config: V2ControllerDeployment) -> list[str]:
 | 7 | DB Query Optimization | 🟡 Medium | Medium | 2 |
 | 6 | JWT Authentication | 🟠 Critical (security) | Medium | 3 |
 
+---
+
 ### Phase 1 — Foundation (Low-Hanging Fruit + Stability)
-Docker event stream, MQTT reconnect, health check, and deploy validation. These have the highest ratio of impact to implementation cost.
+
+> **Goal**: Eliminate the most common production failures and improve observability with minimal code surface change. Each task is self-contained and can be shipped independently.
+
+---
+
+#### 1.1 — Docker Event Stream _(Improvement #2)_
+
+**Description**: Replace the 1-second `containers.list()` polling loop in `BotsOrchestrator.update_active_bots()` with a real-time Docker event stream using `docker.client.events()`. Keep the polling loop as a 30-second reconciliation fallback.
+
+**Subtasks**:
+- [ ] Add `_docker_event_listener()` async task to `BotsOrchestrator` that consumes `docker.client.events(filters={"type": "container"})` via `run_in_executor`.
+- [ ] Map Docker actions → internal handlers: `start` → `_on_container_started()`, `die`/`stop`/`kill` → `_on_container_stopped(exit_code)`.
+- [ ] On `_on_container_stopped` with non-zero exit code, call `mark_pending_bot_failed()` immediately and capture container logs.
+- [ ] Reduce `update_active_bots` sleep from `1.0s` to `30.0s` (reconciliation only).
+- [ ] Add restart logic for the event listener task if the Docker stream drops (reconnect with 5s delay).
+- [ ] Write unit tests mocking `docker.client.events()` for `start`, `die`, and `kill` actions.
+
+**Acceptance Criteria**:
+- A container crash is reflected in `pending_bots` within **< 500ms** of the Docker `die` event.
+- The `update_active_bots` reconciliation still correctly syncs state after 30s if the event stream missed an event.
+- No regression in the `bot_deployment` WS subscription test plan (`docs/test/bot_deployment_manual_test.md`).
+
+---
+
+#### 1.2 — MQTT Reconnection Backoff _(Improvement #9)_
+
+**Description**: Add an exponential-backoff reconnect loop to `utils/mqtt_manager.py` so the API automatically recovers from transient EMQX broker restarts without requiring an API process restart.
+
+**Subtasks**:
+- [ ] Implement `_reconnect_loop()` async method with initial delay `1s`, doubling up to `60s` max.
+- [ ] Hook into the `on_disconnect` callback of the MQTT client to trigger `_reconnect_loop()`.
+- [ ] On reconnect success, re-subscribe to all previously registered bot topics (`hbot/+/hb`, etc.).
+- [ ] Expose `MQTTManager.is_connected() -> bool` as a public method (used by the health check).
+- [ ] Add a `connected_since: float` timestamp attribute, reset on each reconnect.
+- [ ] Log all reconnect attempts at `WARNING` level with the current retry delay.
+
+**Acceptance Criteria**:
+- Stopping and restarting the EMQX container while the API is running causes zero API restarts; the MQTT connection recovers automatically.
+- Reconnect attempts are visible in API logs with delay progression (1s, 2s, 4s, …).
+- `is_connected()` returns `False` during the reconnect window and `True` after recovery.
+- Bot heartbeat subscriptions are restored immediately after reconnect.
+
+---
+
+#### 1.3 — Health Check Endpoint _(Improvement #8)_
+
+**Description**: Add a `/health` REST endpoint that checks DB, MQTT, and Docker connectivity, and wire it into the Docker `HEALTHCHECK` instruction so orchestrators can detect partial failures.
+
+**Subtasks**:
+- [ ] Create `routers/health.py` with a `GET /health` endpoint (no auth required).
+- [ ] Check DB: execute `SELECT 1` within `get_session_context()`; report `"ok"` or `"error: <msg>"`.
+- [ ] Check MQTT: call `bots_orchestrator.mqtt_manager.is_connected()`.
+- [ ] Check Docker: call `docker_service.is_docker_running()`.
+- [ ] Return `HTTP 200` when all checks pass; `HTTP 503` if any check fails.
+- [ ] Include `{"status": {"database": "ok", "mqtt": "ok", "docker": "ok"}, "uptime_seconds": ...}` in the response body.
+- [ ] Add `HEALTHCHECK` directive to `Dockerfile` targeting `GET /health`.
+- [ ] Register the router in `main.py` **without** `Depends(auth_user)`.
+
+**Acceptance Criteria**:
+- `curl localhost:8000/health` returns `200` with all checks `"ok"` when services are running.
+- Stopping the EMQX container causes `/health` to return `503` with `"mqtt": "disconnected"`.
+- `docker inspect <api_container>` shows `Health: healthy` / `unhealthy` correctly reflecting the endpoint status.
+
+---
+
+#### 1.4 — Deploy Pre-flight Validation _(Improvement #10)_
+
+**Description**: Before creating any Docker container, validate the deployment config against the local filesystem. Return a `400 Bad Request` with a specific error list if validation fails, rather than letting the container fail 60 seconds later.
+
+**Subtasks**:
+- [ ] Create `validate_deployment_config(config: V2ControllerDeployment) -> list[str]` in `routers/bot_orchestration.py`.
+- [ ] Validate: credentials profile directory exists under `bots/credentials/`.
+- [ ] Validate: `script_config` YAML file exists under `bots/conf/scripts/` (if provided).
+- [ ] Validate: all `controllers_config` entries referenced in the script YAML exist under `bots/conf/controllers/`.
+- [ ] Validate: Docker image is available locally; if not, surface a warning (not a hard error — user may rely on auto-pull).
+- [ ] Call validator at the top of both `deploy-v2-controllers` and `deploy-v2-script` handlers; raise `HTTPException(400)` if errors are found.
+- [ ] Add a test for each validation failure case.
+
+**Acceptance Criteria**:
+- Deploying with a non-existent `credentials_profile` returns `400` immediately with message `"Credentials profile 'xyz' not found"`.
+- Deploying with a missing controller YAML returns `400` listing the missing files.
+- A valid config passes validation and proceeds to container creation as before.
+- Response time for a failed validation is **< 50ms** (no Docker calls made).
+
+---
 
 ### Phase 2 — Performance & UX (Terminal-Grade Responsiveness)
-Event bus, WS delta protocol, WS commands, and controller management. These require coordinated refactoring but deliver the latency improvements needed for a real-time trading terminal.
+
+> **Goal**: Replace the polling architecture with an event-driven system, add WS command support, and enable fine-grained controller management. Phase 1 must be complete before starting Phase 2.
+
+---
+
+#### 2.1 — Internal Event Bus _(Improvement #1)_
+
+**Description**: Introduce an `asyncio.Queue`-based `EventBus` that `MQTTManager` publishes to on every incoming message. Push loops in `ExecutorWebSocketManager` subscribe to the bus and replace their `asyncio.sleep` wait with `await queue.get()`, reducing event latency from `update_interval` seconds to near-zero.
+
+**Subtasks**:
+- [ ] Create `utils/event_bus.py` with `EventBus` class and `BotEvent` dataclass (fields: `bot_name`, `event_type`, `payload`).
+- [ ] Instantiate `EventBus` in `main.py` `lifespan()` and store in `app.state.event_bus`.
+- [ ] Inject `EventBus` into `MQTTManager`; call `bus.publish(BotEvent(...))` in the `on_message` handler for `performance`, `hb`, `status_updates`, and `log` topics.
+- [ ] Refactor `_bot_status_push_loop`, `_performance_push_loop`, and `_logs_push_loop` in `ExecutorWebSocketManager` to use `await queue.get()` instead of `asyncio.sleep`.
+- [ ] Keep `asyncio.sleep(interval)` as a **heartbeat fallback** (send a `heartbeat` message if no event arrives within `update_interval`).
+- [ ] Ensure `EventBus.unsubscribe()` is called from `ExecutorWebSocketManager.remove_connection()` to prevent queue leaks.
+- [ ] Add a queue depth metric log (warn if queue depth > 100 for a subscriber).
+
+**Acceptance Criteria**:
+- A new MQTT performance message is pushed to all subscribed WS clients within **< 100ms** end-to-end.
+- CPU usage of the API process is reduced when no MQTT messages are in flight (no busy-wait).
+- Existing WS subscription types (`bot_status`, `performance`, `positions`) work without behavior change.
+- Stress test: 10 simultaneous WS clients × 5 subscriptions each — no queue overflow or goroutine leak.
+
+---
+
+#### 2.2 — WS Delta Protocol + Fine-Grained Channels _(Improvement #3)_
+
+**Description**: Add a `mode` field to WS push messages (`snapshot` on first send, `delta` on subsequent changes). Split the monolithic `all_bots_status` into narrower channels that the UI can subscribe to independently.
+
+**Subtasks**:
+- [ ] Add `mode: "snapshot" | "delta"` field to all WS push message schemas.
+- [ ] In each push loop, send `mode: "snapshot"` on first push; compute field-level diff on subsequent pushes and send `mode: "delta"` with only changed fields.
+- [ ] Add new subscription type `bot_heartbeat`: event-driven (MQTT LWT + `hb` topic), sends `{ bot_name, online: bool, timestamp }`.
+- [ ] Add new subscription type `bot_trades`: subscribes to fill/order events from MQTT and forwards each trade event individually.
+- [ ] Add `heartbeat` keepalive message: if no delta is sent within `update_interval * 3`, send `{"type": "heartbeat", "subscription_id": ..., "timestamp": ...}`.
+- [ ] Update `SUBSCRIPTION_TYPES` set and the `_get_push_fn` dispatch map in `executor_ws_manager.py`.
+- [ ] Update `docs/ws.md` with the new message schemas and channel list.
+
+**Acceptance Criteria**:
+- The first message after `subscribe` always contains `"mode": "snapshot"` with full data.
+- Subsequent messages only include changed fields (`"mode": "delta"`).
+- `bot_heartbeat` fires within **< 200ms** of an MQTT `hb` message being received.
+- WS payload size for `all_bots_status` with 20 bots and no changes drops by ≥ 70% compared to current (delta = empty).
+
+---
+
+#### 2.3 — WebSocket RPC for Bot Commands _(Improvement #4)_
+
+**Description**: Extend the existing WS JSON dispatch in `routers/websocket.py` to accept `"action": "command"` messages. Route commands to `BotsOrchestrator` methods and return async acks and results over the same WS connection.
+
+**Subtasks**:
+- [ ] Add `"command"` branch to the WS message dispatch in `routers/websocket.py` alongside existing `"subscribe"` and `"unsubscribe"`.
+- [ ] Define supported commands: `start_bot`, `stop_bot`, `configure_bot`, `import_strategy`.
+- [ ] For each command, immediately send a `command_ack` response (`status: "sent"` or `status: "error"`).
+- [ ] For commands that return MQTT responses (e.g., `history`), use `publish_command_and_wait()` and send a `command_result` message asynchronously once the response arrives.
+- [ ] Add `request_id` field threading: client sends `request_id`, all ack/result messages echo it back for correlation.
+- [ ] Add WS auth check at command dispatch (reject if connection is unauthenticated).
+- [ ] Document the command protocol in `docs/ws.md` with request/response examples.
+
+**Acceptance Criteria**:
+- Sending `{"action": "command", "command": "stop_bot", "bot_name": "bot_001", "request_id": "r1"}` over WS receives a `command_ack` within **< 50ms**.
+- The bot actually stops (MQTT stop command is dispatched) and the corresponding `bot_status` subscription reflects the new state.
+- An unknown `command` value returns `{"type": "error", "message": "Unknown command: xyz", "request_id": "r1"}`.
+- REST endpoints remain fully functional alongside WS commands (no regression).
+
+---
+
+#### 2.4 — Deep Controller Management _(Improvement #5)_
+
+**Description**: Add REST and WS endpoints to start, stop, and hot-reload individual controllers inside a running bot without restarting the entire bot process. Uses the MQTT `config` and `controller` topics supported by `v2_with_controllers.py`.
+
+**Subtasks**:
+- [ ] Add `set_controller_config(bot_name, controller_id, params)` to `BotsOrchestrator`.
+- [ ] Add `stop_controller(bot_name, controller_id)` and `start_controller(bot_name, controller_id)` to `BotsOrchestrator`.
+- [ ] Add REST endpoints to `routers/bot_orchestration.py`:
+  - `POST /bot-orchestration/{bot_name}/controllers/{controller_id}/start`
+  - `POST /bot-orchestration/{bot_name}/controllers/{controller_id}/stop`
+  - `PUT  /bot-orchestration/{bot_name}/controllers/{controller_id}/config`
+- [ ] Add WS command handlers for `enable_controller`, `disable_controller`, and `update_controller_config`.
+- [ ] Verify the MQTT payload format accepted by Hummingbot's `v2_with_controllers.py` for each action.
+- [ ] Write manual test plan in `docs/test/` covering each controller action.
+
+**Acceptance Criteria**:
+- Calling `PUT /bot-orchestration/bot_001/controllers/ctrl_A/config` with new params updates the controller live; the bot does **not** restart.
+- `POST /bot-orchestration/bot_001/controllers/ctrl_A/stop` stops only controller A; other controllers in the same bot keep running.
+- `bot_status` WS subscription reflects the controller's new status within 5s of the action.
+- Returns `404` if the bot is not active or the controller ID is unknown.
+
+---
 
 ### Phase 3 — Security & Scale
-JWT auth, DB optimizations, pagination. Required before a multi-user or public-facing deployment.
+
+> **Goal**: Harden the API for multi-user and public-network deployments. Phase 2 must be complete (or running in parallel with security hardening) before production exposure.
+
+---
+
+#### 3.1 — JWT Bearer Token Authentication _(Improvement #6)_
+
+**Description**: Replace the single global HTTP Basic Auth credential with JWT Bearer tokens. Add a `POST /auth/token` endpoint for token issuance. WS connections accept the token via query param.
+
+**Subtasks**:
+- [ ] Add `jwt_secret` to `config.py` / `settings.security` (read from `.env`).
+- [ ] Create `utils/auth.py` with `create_access_token(username, expires_minutes)` and `verify_token(token)` using `PyJWT`.
+- [ ] Add `POST /auth/token` endpoint: validates Basic credentials, returns `{ "access_token": "...", "expires_in": 3600 }`.
+- [ ] Replace `Depends(auth_user)` across all routers with `Depends(verify_jwt_token)`.
+- [ ] Add WS token verification: extract `?token=<jwt>` query param in `routers/websocket.py`; reject with `1008 Policy Violation` if invalid.
+- [ ] Keep Basic Auth on `/auth/token` only (token issuance endpoint).
+- [ ] Add token expiry handling: return `HTTP 401` with `"WWW-Authenticate": "Bearer"` on expired tokens.
+- [ ] Update `README.md` with the new auth flow.
+
+**Acceptance Criteria**:
+- `POST /auth/token` with valid credentials returns a JWT that can be used on all other endpoints.
+- An expired or tampered token returns `401 Unauthorized`.
+- WS connection without a valid token is rejected at handshake time (not after the first message).
+- Existing Basic Auth credentials in `.env` still work for token issuance (backward compatibility).
+
+---
+
+#### 3.2 — Database Query Optimization & Caching _(Improvement #7)_
+
+**Description**: Add an in-memory TTL cache for the executor list, add DB indexes to high-cardinality columns, and add pagination to the `GET /executors/search` endpoint.
+
+**Subtasks**:
+- [ ] Add `index=True` to `controller_id`, `status`, `account_name`, and `timestamp` columns in `database/models.py` for the executors table.
+- [ ] Generate and apply an Alembic migration for the new indexes.
+- [ ] Implement `get_executors_cached()` in `ExecutorService` with a 1-second TTL using `time.monotonic()`.
+- [ ] Add `limit: int = 100` and `offset: int = 0` parameters to `POST /executors/search` request model and repository query.
+- [ ] Add `limit` and `offset` support to the `executors` WS subscription (passed in `filters`).
+- [ ] Add a `total_count` field to `GET /executors/search` response for UI pagination controls.
+- [ ] Benchmark `get_executors()` before and after with a dataset of 10,000 executor records; document results.
+
+**Acceptance Criteria**:
+- `POST /executors/search` with 10,000 records returns in **< 100ms** with indexes applied.
+- Repeated calls to `get_executors_cached()` within the 1s TTL window do not trigger a DB query.
+- Paginated results are consistent (no duplicates, no missing records) with `limit=50&offset=50` etc.
+- Alembic migration runs cleanly on a fresh and an existing database.
+
