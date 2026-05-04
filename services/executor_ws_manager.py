@@ -10,7 +10,8 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
+from utils.event_bus import EventBus
 
 from fastapi import WebSocket
 
@@ -97,11 +98,13 @@ class ExecutorWebSocketManager:
         market_data_service: MarketDataService,
         bots_orchestrator: Optional[BotsOrchestrator] = None,
         docker_service: Optional["DockerService"] = None,
+        event_bus: Optional[EventBus] = None,
     ):
         self._executor_service = executor_service
         self._market_data_service = market_data_service
         self._bots_orchestrator = bots_orchestrator
         self._docker_service = docker_service
+        self._event_bus = event_bus
         # conn_id -> {sub_id -> ExecutorSubscription}
         self._subscriptions: Dict[str, Dict[str, ExecutorSubscription]] = {}
 
@@ -239,6 +242,8 @@ class ExecutorWebSocketManager:
         for sub in conn_subs.values():
             if sub.task and not sub.task.done():
                 sub.task.cancel()
+            if self._event_bus:
+                self._event_bus.unsubscribe(f"{conn_id}-{sub.sub_id}")
         if conn_subs:
             logger.info(
                 f"[WS-Exec] Cleaned up {len(conn_subs)} subscriptions for {conn_id}"
@@ -353,8 +358,18 @@ class ExecutorWebSocketManager:
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
     ) -> None:
         """Poll get_performance_report() and push on change."""
+        subscriber_id = f"{conn_id}-{sub.sub_id}"
+        queue = self._event_bus.subscribe(subscriber_id) if self._event_bus else None
         try:
             while True:
+                if queue:
+                    try:
+                        await asyncio.wait_for(queue.get(), timeout=sub.update_interval)
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(sub.update_interval)
+
                 try:
                     data = await self._executor_service.get_performance_report(
                         controller_id=sub.controller_id,
@@ -371,9 +386,14 @@ class ExecutorWebSocketManager:
                         })
                 except Exception as e:
                     logger.error(f"[WS-Exec] performance push error: {e}", exc_info=True)
-                await asyncio.sleep(sub.update_interval)
+
+                if queue and self._event_bus.queue_depth(subscriber_id) > 100:
+                    logger.warning(f"[WS-Exec] Queue depth > 100 for {subscriber_id}")
         except asyncio.CancelledError:
             pass
+        finally:
+            if queue and self._event_bus:
+                self._event_bus.unsubscribe(subscriber_id)
 
     async def _positions_push_loop(
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
@@ -451,8 +471,18 @@ class ExecutorWebSocketManager:
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
     ) -> None:
         """Poll get_executor_logs() and push only new entries."""
+        subscriber_id = f"{conn_id}-{sub.sub_id}"
+        queue = self._event_bus.subscribe(subscriber_id) if self._event_bus else None
         try:
             while True:
+                if queue:
+                    try:
+                        await asyncio.wait_for(queue.get(), timeout=sub.update_interval)
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(sub.update_interval)
+
                 try:
                     all_logs = self._executor_service.get_executor_logs(
                         sub.executor_id,
@@ -472,16 +502,31 @@ class ExecutorWebSocketManager:
                         })
                 except Exception as e:
                     logger.error(f"[WS-Exec] logs push error: {e}", exc_info=True)
-                await asyncio.sleep(sub.update_interval)
+
+                if queue and self._event_bus.queue_depth(subscriber_id) > 100:
+                    logger.warning(f"[WS-Exec] Queue depth > 100 for {subscriber_id}")
         except asyncio.CancelledError:
             pass
+        finally:
+            if queue and self._event_bus:
+                self._event_bus.unsubscribe(subscriber_id)
 
     async def _bot_status_push_loop(
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
     ) -> None:
         """Poll get_bot_status() for a single bot and push on change (no logs)."""
+        subscriber_id = f"{conn_id}-{sub.sub_id}"
+        queue = self._event_bus.subscribe(subscriber_id) if self._event_bus else None
         try:
             while True:
+                if queue:
+                    try:
+                        await asyncio.wait_for(queue.get(), timeout=sub.update_interval)
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(sub.update_interval)
+
                 try:
                     raw_status = self._bots_orchestrator.get_bot_status(sub.bot_name)
                     # Strip logs — only send status, performance, custom_info
@@ -502,9 +547,14 @@ class ExecutorWebSocketManager:
                         })
                 except Exception as e:
                     logger.error(f"[WS-Exec] bot_status push error: {e}", exc_info=True)
-                await asyncio.sleep(sub.update_interval)
+
+                if queue and self._event_bus.queue_depth(subscriber_id) > 100:
+                    logger.warning(f"[WS-Exec] Queue depth > 100 for {subscriber_id}")
         except asyncio.CancelledError:
             pass
+        finally:
+            if queue and self._event_bus:
+                self._event_bus.unsubscribe(subscriber_id)
 
     async def _all_bots_status_push_loop(
         self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription

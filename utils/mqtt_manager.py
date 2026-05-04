@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, Optional, Set
 
 import aiomqtt
+from utils.event_bus import EventBus, BotEvent
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +19,13 @@ class MQTTManager:
     Uses asyncio-mqtt (aiomqtt) for asynchronous MQTT operations.
     """
 
-    def __init__(self, host: str, port: int, username: str, password: str, ssl: bool = False):
+    def __init__(self, host: str, port: int, username: str, password: str, ssl: bool = False, event_bus: Optional[EventBus] = None):
         self.host = host
         self.port = port
         self.username = username
         self.password = password
         self.ssl = ssl
+        self._event_bus = event_bus
 
         # Message handlers by topic pattern
         self._handlers: Dict[str, Callable] = {}
@@ -254,6 +256,9 @@ class MQTTManager:
                 if bot_id not in self._bot_controller_reports:
                     self._bot_controller_reports[bot_id] = {}
                 self._bot_controller_reports[bot_id][controller_id] = controller_report
+            
+            if self._event_bus:
+                self._event_bus.publish(BotEvent(bot_name=bot_id, event_type="performance", payload=data))
 
     async def _handle_log(self, bot_id: str, data: Any):
         """Handle log messages with deduplication."""
@@ -309,6 +314,9 @@ class MQTTManager:
             log_entry = {"level_name": "INFO", "msg": data, "timestamp": timestamp}
             self._bot_logs[bot_id].append(log_entry)
 
+        if self._event_bus:
+            self._event_bus.publish(BotEvent(bot_name=bot_id, event_type="log", payload=data))
+
     async def _handle_notify(self, bot_id: str, data: Any):
         """Handle notification messages."""
         # Store notifications if needed
@@ -316,10 +324,14 @@ class MQTTManager:
     async def _handle_status(self, bot_id: str, data: Any):
         """Handle status updates."""
         # Store latest status
+        if self._event_bus:
+            self._event_bus.publish(BotEvent(bot_name=bot_id, event_type="status", payload=data))
 
     async def _handle_heartbeat(self, bot_id: str, data: Any):
         """Handle heartbeat messages."""
         self._discovered_bots[bot_id] = time.time()  # Update last seen
+        if self._event_bus:
+            self._event_bus.publish(BotEvent(bot_name=bot_id, event_type="hb", payload=data))
 
     async def _handle_events(self, bot_id: str, data: Any):
         """Handle internal events."""

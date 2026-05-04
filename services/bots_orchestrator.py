@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class BotsOrchestrator:
     """Orchestrates Hummingbot instances using Docker and MQTT communication."""
 
-    def __init__(self, broker_host, broker_port, broker_username, broker_password, broker_ssl=False):
+    def __init__(self, broker_host, broker_port, broker_username, broker_password, broker_ssl=False, event_bus=None):
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.broker_username = broker_username
@@ -34,6 +34,7 @@ class BotsOrchestrator:
             username=broker_username,
             password=broker_password,
             ssl=broker_ssl,
+            event_bus=event_bus,
         )
 
         # Active bots tracking
