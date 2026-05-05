@@ -9,13 +9,13 @@ Both use the same subscribe/unsubscribe/ping protocol and support Basic Auth.
 
 ## Authentication
 
-All WebSocket connections require authentication via one of three methods:
+All WebSocket connections require authentication via an `authenticate` message. This **must** be the very first message sent by the client after the connection is accepted.
 
-| Method | Example |
-|---|---|
-| `Authorization` header | `Authorization: Basic base64(user:pass)` |
-| `?token=` query param | `?token=base64(user:pass)` |
-| Separate query params | `?username=admin&password=admin` |
+| Action | Parameters | Example |
+|---|---|---|
+| `authenticate` | `username`, `password` | `{"action": "authenticate", "username": "admin", "password": "admin"}` |
+
+If the first message is not a valid `authenticate` message within 5 seconds, the server will close the connection with code `4403` (Forbidden).
 
 Debug mode (`DEBUG_MODE=true` in `.env`) bypasses auth.
 
@@ -28,7 +28,8 @@ Every message is a JSON object with an `action` field.
 ### Actions (client → server)
 
 ```json
-{ "action": "subscribe",   "type": "<sub_type>", ...params }
+{ "action": "authenticate", "username": "<user>", "password": "<pass>" }
+{ "action": "subscribe",    "type": "<sub_type>", ...params }
 { "action": "unsubscribe", "subscription_id": "<id>" }
 { "action": "ping" }
 { "action": "command",     "command": "<cmd>", "bot_name": "...", "params": {...} }

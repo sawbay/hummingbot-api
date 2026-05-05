@@ -20,44 +20,39 @@ router = APIRouter(tags=["WebSocket"])
 HEARTBEAT_INTERVAL = 30  # seconds
 
 
-def _authenticate_websocket(websocket: WebSocket) -> bool:
+async def _authenticate_websocket(websocket: WebSocket) -> bool:
     """
-    Authenticate a WebSocket connection using Basic Auth from headers or query params.
+    Authenticate a WebSocket connection by waiting for an 'authenticate' message.
+    The client MUST send this as the very first message.
 
     Returns True if authenticated (or debug mode), False otherwise.
     """
     if settings.security.debug_mode:
         return True
 
-    # Try Authorization header first
-    auth_header = websocket.headers.get("authorization", "")
-    if auth_header.startswith("Basic "):
-        try:
-            decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
-            ws_user, ws_pass = decoded.split(":", 1)
-        except Exception:
+    try:
+        # Wait for the first message with a 5s timeout
+        msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+        if msg.get("action") != "authenticate":
+            logger.warning(f"[WS] Auth failed: First message action was '{msg.get('action')}', not 'authenticate'")
             return False
-    else:
-        # Fallback: ?token=base64(user:pass) query param
-        token = websocket.query_params.get("token")
-        if token:
-            try:
-                decoded = base64.b64decode(token).decode("utf-8")
-                ws_user, ws_pass = decoded.split(":", 1)
-            except Exception:
-                return False
-        else:
-            # Fallback to query parameters
-            ws_user = websocket.query_params.get("username", "")
-            ws_pass = websocket.query_params.get("password", "")
 
-    correct_user = secrets.compare_digest(
-        ws_user.encode(), settings.security.username.encode()
-    )
-    correct_pass = secrets.compare_digest(
-        ws_pass.encode(), settings.security.password.encode()
-    )
-    return correct_user and correct_pass
+        ws_user = msg.get("username", "")
+        ws_pass = msg.get("password", "")
+
+        correct_user = secrets.compare_digest(
+            ws_user.encode(), settings.security.username.encode()
+        )
+        correct_pass = secrets.compare_digest(
+            ws_pass.encode(), settings.security.password.encode()
+        )
+        return correct_user and correct_pass
+    except asyncio.TimeoutError:
+        logger.warning("[WS] Auth failed: Timeout waiting for 'authenticate' message")
+        return False
+    except Exception as e:
+        logger.warning(f"[WS] Auth failed: {e}")
+        return False
 
 
 
@@ -186,8 +181,8 @@ async def market_data_websocket(websocket: WebSocket) -> None:
     """
     WebSocket endpoint for streaming market data.
 
-    Authentication: Basic Auth via Authorization header, ?token=base64(user:pass),
-    or query params (?username=...&password=...).
+    Authentication: First message must be an 'authenticate' action:
+    {"action": "authenticate", "username": "...", "password": "..."}
 
     Subscribe/unsubscribe protocol:
         -> {"action": "subscribe", "type": "candles", "connector": "binance",
@@ -204,12 +199,12 @@ async def market_data_websocket(websocket: WebSocket) -> None:
     """
     await websocket.accept()
 
-    if not _authenticate_websocket(websocket):
+    if not await _authenticate_websocket(websocket):
         await websocket.send_json({
             "type": "error",
-            "message": "Authentication failed",
+            "message": "Authentication failed. First message must be {'action': 'authenticate', 'username': '...', 'password': '...'}",
         })
-        await websocket.close(code=4001, reason="Authentication failed")
+        await websocket.close(code=4403, reason="Forbidden")
         return
 
     manager: WebSocketManager = websocket.app.state.websocket_manager
@@ -267,8 +262,8 @@ async def executors_websocket(websocket: WebSocket) -> None:
     """
     WebSocket endpoint for streaming executor data.
 
-    Authentication: Basic Auth via Authorization header, ?token=base64(user:pass),
-    or query params (?username=...&password=...).
+    Authentication: First message must be an 'authenticate' action:
+    {"action": "authenticate", "username": "...", "password": "..."}
 
     Subscribe/unsubscribe protocol:
         -> {"action": "subscribe", "type": "executor_summary", "update_interval": 2.0}
@@ -292,12 +287,12 @@ async def executors_websocket(websocket: WebSocket) -> None:
     await websocket.accept()
 
     # Authenticate
-    if not _authenticate_websocket(websocket):
+    if not await _authenticate_websocket(websocket):
         await websocket.send_json({
             "type": "error",
-            "message": "Authentication failed",
+            "message": "Authentication failed. First message must be {'action': 'authenticate', 'username': '...', 'password': '...'}",
         })
-        await websocket.close(code=4001, reason="Authentication failed")
+        await websocket.close(code=4403, reason="Forbidden")
         return
 
     # Get manager from app state
