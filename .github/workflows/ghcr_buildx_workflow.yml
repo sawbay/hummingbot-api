@@ -12,7 +12,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/hummingbot-api
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/hummingbot-api-custom
 
 jobs:
   build_and_push:
