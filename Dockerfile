@@ -23,7 +23,7 @@ FROM continuumio/miniconda3
 # Install only runtime dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    libusb-1.0-0 \
+    libusb-1.0-0 curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the conda environment from builder
@@ -47,6 +47,10 @@ RUN mkdir -p bots/instances bots/conf bots/credentials bots/data bots/archived
 
 # Expose port
 EXPOSE 8000
+
+# Docker Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
 
 # Set environment variables to ensure conda env is used
 ENV PATH="/opt/conda/envs/hummingbot-api/bin:$PATH"

@@ -20,44 +20,145 @@ router = APIRouter(tags=["WebSocket"])
 HEARTBEAT_INTERVAL = 30  # seconds
 
 
-def _authenticate_websocket(websocket: WebSocket) -> bool:
+async def _authenticate_websocket(websocket: WebSocket) -> bool:
     """
-    Authenticate a WebSocket connection using Basic Auth from headers or query params.
+    Authenticate a WebSocket connection by waiting for an 'authenticate' message.
+    The client MUST send this as the very first message.
 
     Returns True if authenticated (or debug mode), False otherwise.
     """
     if settings.security.debug_mode:
         return True
 
-    # Try Authorization header first
-    auth_header = websocket.headers.get("authorization", "")
-    if auth_header.startswith("Basic "):
-        try:
-            decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
-            ws_user, ws_pass = decoded.split(":", 1)
-        except Exception:
+    try:
+        # Wait for the first message with a 5s timeout
+        msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+        if msg.get("action") != "authenticate":
+            logger.warning(f"[WS] Auth failed: First message action was '{msg.get('action')}', not 'authenticate'")
             return False
-    else:
-        # Fallback: ?token=base64(user:pass) query param
-        token = websocket.query_params.get("token")
-        if token:
-            try:
-                decoded = base64.b64decode(token).decode("utf-8")
-                ws_user, ws_pass = decoded.split(":", 1)
-            except Exception:
-                return False
-        else:
-            # Fallback to query parameters
-            ws_user = websocket.query_params.get("username", "")
-            ws_pass = websocket.query_params.get("password", "")
 
-    correct_user = secrets.compare_digest(
-        ws_user.encode(), settings.security.username.encode()
-    )
-    correct_pass = secrets.compare_digest(
-        ws_pass.encode(), settings.security.password.encode()
-    )
-    return correct_user and correct_pass
+        ws_user = msg.get("username", "")
+        ws_pass = msg.get("password", "")
+
+        correct_user = secrets.compare_digest(
+            ws_user.encode(), settings.security.username.encode()
+        )
+        correct_pass = secrets.compare_digest(
+            ws_pass.encode(), settings.security.password.encode()
+        )
+        return correct_user and correct_pass
+    except asyncio.TimeoutError:
+        logger.warning("[WS] Auth failed: Timeout waiting for 'authenticate' message")
+        return False
+    except Exception as e:
+        logger.warning(f"[WS] Auth failed: {e}")
+        return False
+
+
+
+async def _handle_ws_command(
+    websocket: WebSocket,
+    msg: dict,
+    bots_orchestrator,  # BotsOrchestrator instance
+) -> None:
+    """Dispatch a bot command received over WebSocket."""
+    command = msg.get("command")
+    request_id = msg.get("request_id")
+    bot_name = msg.get("bot_name")
+
+    SUPPORTED_COMMANDS = {
+        "start_bot", "stop_bot", "configure_bot", "import_strategy", "get_history",
+        "start_controller", "stop_controller", "update_controller_config"
+    }
+
+    if command not in SUPPORTED_COMMANDS:
+        await websocket.send_json({
+            "type": "error",
+            "message": f"Unknown command: {command}. Supported: {sorted(SUPPORTED_COMMANDS)}",
+            "request_id": request_id,
+        })
+        return
+
+    if not bot_name:
+        await websocket.send_json({
+            "type": "error",
+            "message": "Command requires 'bot_name'",
+            "request_id": request_id,
+        })
+        return
+
+    # Immediately acknowledge receipt
+    await websocket.send_json({
+        "type": "command_ack",
+        "request_id": request_id,
+        "command": command,
+        "bot_name": bot_name,
+        "status": "sent",
+        "message": f"Command '{command}' dispatched to {bot_name}",
+    })
+
+    # Execute the command
+    try:
+        params = msg.get("params", {})
+
+        if command == "start_bot":
+            result = await bots_orchestrator.start_bot(bot_name, **params)
+
+        elif command == "stop_bot":
+            result = await bots_orchestrator.stop_bot(bot_name, **params)
+
+        elif command == "configure_bot":
+            result = await bots_orchestrator.configure_bot(bot_name, params=params)
+
+        elif command == "import_strategy":
+            strategy = params.get("strategy") or msg.get("strategy")
+            if not strategy:
+                result = {"success": False, "message": "import_strategy requires 'strategy'"}
+            else:
+                result = await bots_orchestrator.import_strategy_for_bot(bot_name, strategy)
+
+        elif command == "get_history":
+            result = await bots_orchestrator.get_bot_history(bot_name, **params)
+
+        elif command == "start_controller":
+            controller_id = params.get("controller_id") or msg.get("controller_id")
+            if not controller_id:
+                result = {"success": False, "message": "start_controller requires 'controller_id'"}
+            else:
+                result = await bots_orchestrator.start_controller(bot_name, controller_id)
+
+        elif command == "stop_controller":
+            controller_id = params.get("controller_id") or msg.get("controller_id")
+            if not controller_id:
+                result = {"success": False, "message": "stop_controller requires 'controller_id'"}
+            else:
+                result = await bots_orchestrator.stop_controller(bot_name, controller_id)
+
+        elif command == "update_controller_config":
+            controller_id = params.get("controller_id") or msg.get("controller_id")
+            config_params = params.get("params", {})
+            if not controller_id:
+                result = {"success": False, "message": "update_controller_config requires 'controller_id'"}
+            else:
+                result = await bots_orchestrator.set_controller_config(bot_name, controller_id, config_params)
+
+        await websocket.send_json({
+            "type": "command_result",
+            "request_id": request_id,
+            "command": command,
+            "bot_name": bot_name,
+            "result": result,
+        })
+
+    except Exception as e:
+        logger.error(f"[WS-Cmd] Error executing {command} for {bot_name}: {e}", exc_info=True)
+        await websocket.send_json({
+            "type": "command_result",
+            "request_id": request_id,
+            "command": command,
+            "bot_name": bot_name,
+            "result": {"success": False, "message": str(e)},
+        })
 
 
 async def _heartbeat_loop(websocket: WebSocket) -> None:
@@ -80,8 +181,8 @@ async def market_data_websocket(websocket: WebSocket) -> None:
     """
     WebSocket endpoint for streaming market data.
 
-    Authentication: Basic Auth via Authorization header, ?token=base64(user:pass),
-    or query params (?username=...&password=...).
+    Authentication: First message must be an 'authenticate' action:
+    {"action": "authenticate", "username": "...", "password": "..."}
 
     Subscribe/unsubscribe protocol:
         -> {"action": "subscribe", "type": "candles", "connector": "binance",
@@ -98,12 +199,12 @@ async def market_data_websocket(websocket: WebSocket) -> None:
     """
     await websocket.accept()
 
-    if not _authenticate_websocket(websocket):
+    if not await _authenticate_websocket(websocket):
         await websocket.send_json({
             "type": "error",
-            "message": "Authentication failed",
+            "message": "Authentication failed. First message must be {'action': 'authenticate', 'username': '...', 'password': '...'}",
         })
-        await websocket.close(code=4001, reason="Authentication failed")
+        await websocket.close(code=4403, reason="Forbidden")
         return
 
     manager: WebSocketManager = websocket.app.state.websocket_manager
@@ -161,8 +262,8 @@ async def executors_websocket(websocket: WebSocket) -> None:
     """
     WebSocket endpoint for streaming executor data.
 
-    Authentication: Basic Auth via Authorization header, ?token=base64(user:pass),
-    or query params (?username=...&password=...).
+    Authentication: First message must be an 'authenticate' action:
+    {"action": "authenticate", "username": "...", "password": "..."}
 
     Subscribe/unsubscribe protocol:
         -> {"action": "subscribe", "type": "executor_summary", "update_interval": 2.0}
@@ -186,12 +287,12 @@ async def executors_websocket(websocket: WebSocket) -> None:
     await websocket.accept()
 
     # Authenticate
-    if not _authenticate_websocket(websocket):
+    if not await _authenticate_websocket(websocket):
         await websocket.send_json({
             "type": "error",
-            "message": "Authentication failed",
+            "message": "Authentication failed. First message must be {'action': 'authenticate', 'username': '...', 'password': '...'}",
         })
-        await websocket.close(code=4001, reason="Authentication failed")
+        await websocket.close(code=4403, reason="Forbidden")
         return
 
     # Get manager from app state
@@ -230,11 +331,18 @@ async def executors_websocket(websocket: WebSocket) -> None:
                     "type": "pong",
                     "timestamp": time.time(),
                 })
+            elif action == "command":
+                # Commands are fire-and-forget; run in background task to not block receive loop
+                bots_orchestrator = websocket.app.state.bots_orchestrator
+                asyncio.create_task(
+                    _handle_ws_command(websocket, raw, bots_orchestrator),
+                    name=f"ws-cmd-{conn_id}-{raw.get('request_id', 'unknown')}"
+                )
             else:
                 await websocket.send_json({
                     "type": "error",
                     "message": f"Unknown action: {action}. "
-                               f"Valid actions: subscribe, unsubscribe, ping",
+                               f"Valid actions: subscribe, unsubscribe, ping, command",
                 })
     except WebSocketDisconnect:
         logger.info(f"[WS-Exec] Client disconnected: {conn_id}")

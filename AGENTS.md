@@ -14,6 +14,7 @@ See [`docs/architecture.md`](docs/architecture.md) for a detailed breakdown of t
 | File | Contents |
 |---|---|
 | [`docs/ws.md`](docs/ws.md) | WebSocket API reference and the `bot_deployment` flow. |
+| [`docs/backtesting.md`](docs/backtesting.md) | Backtesting implementation and API reference. |
 | [`docs/test/bot_deployment_manual_test.md`](docs/test/bot_deployment_manual_test.md) | Manual test plan for bot deployment verification. |
 | [`README.md`](README.md) | Quick-start, service URLs, and available commands. |
 

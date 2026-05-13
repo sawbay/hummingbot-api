@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, Optional, Set
 
 import aiomqtt
+from utils.event_bus import EventBus, BotEvent
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +19,13 @@ class MQTTManager:
     Uses asyncio-mqtt (aiomqtt) for asynchronous MQTT operations.
     """
 
-    def __init__(self, host: str, port: int, username: str, password: str, ssl: bool = False):
+    def __init__(self, host: str, port: int, username: str, password: str, ssl: bool = False, event_bus: Optional[EventBus] = None):
         self.host = host
         self.port = port
         self.username = username
         self.password = password
         self.ssl = ssl
+        self._event_bus = event_bus
 
         # Message handlers by topic pattern
         self._handlers: Dict[str, Callable] = {}
@@ -41,8 +43,10 @@ class MQTTManager:
         self._message_ttl = 300  # 5 minutes TTL for processed messages
 
         # Connection state
-        self._connected = False
-        self._reconnect_interval = 5  # seconds
+        self._connected: bool = False
+        self.connected_since: Optional[float] = None
+        self._reconnecting: bool = False
+        self._shutdown: bool = False
         self._client: Optional[aiomqtt.Client] = None
         self._tasks: Set[asyncio.Task] = set()
 
@@ -50,16 +54,16 @@ class MQTTManager:
         self._pending_responses: Dict[str, asyncio.Future] = {}  # reply_to_topic: future
 
         # Subscriptions to restore on reconnect
-        self._subscriptions = [
-            ("hbot/+/log", 1),  # Log messages
-            ("hbot/+/notify", 1),  # Notifications
-            ("hbot/+/status_updates", 1),  # Status updates
-            ("hbot/+/events", 1),  # Internal events
-            ("hbot/+/hb", 1),  # Heartbeats
-            ("hbot/+/performance", 1),  # Performance metrics
-            ("hbot/+/external/event/+", 1),  # External events
-            ("hummingbot-api/response/+", 1),  # RPC responses to our reply_to topics
-        ]
+        self._subscribed_topics: Set[str] = {
+            "hbot/+/log",
+            "hbot/+/notify",
+            "hbot/+/status_updates",
+            "hbot/+/events",
+            "hbot/+/hb",
+            "hbot/+/performance",
+            "hbot/+/external/event/+",
+            "hummingbot-api/response/+",
+        }
 
         if username:
             logger.info(f"MQTT client configured for user: {username}")
@@ -86,31 +90,83 @@ class MQTTManager:
         client = aiomqtt.Client(**client_kwargs)
 
         async with client:
-            self._connected = True
-            logger.info(f"✓ Connected to MQTT broker at {self.host}:{self.port} (ssl={self.ssl})")
-
-            # Subscribe to topics
-            for topic, qos in self._subscriptions:
-                await client.subscribe(topic, qos=qos)
             yield client
-            
-        # Cleanup on exit
+
+    def is_connected(self) -> bool:
+        """Return True if the MQTT client is currently connected, False otherwise."""
+        return self._connected
+
+    async def subscribe(self, topic: str, qos: int = 1):
+        """Subscribe to a topic and track it for reconnection."""
+        self._subscribed_topics.add(topic)
+        if self._connected and self._client:
+            try:
+                await self._client.subscribe(topic, qos=qos)
+                logger.debug(f"Subscribed to {topic}")
+            except Exception as e:
+                logger.error(f"Failed to subscribe to {topic}: {e}")
+
+    async def _on_connect(self):
+        """Set connection state and re-subscribe to all topics."""
+        self._connected = True
+        self.connected_since = time.time()
+        self._reconnecting = False
+        logger.info(f"✓ Connected to MQTT broker at {self.host}:{self.port}")
+
+        # Re-subscribe to all topics
+        for topic in self._subscribed_topics:
+            try:
+                await self._client.subscribe(topic)
+            except Exception as e:
+                logger.error(f"Failed to re-subscribe to {topic}: {e}")
+
+    def _on_disconnect(self):
+        """Set connection state and trigger reconnection loop."""
         self._connected = False
+        self.connected_since = None
+
+        if not self._shutdown and not self._reconnecting:
+            self._reconnecting = True
+            task = asyncio.create_task(self._reconnect_loop())
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    async def _reconnect_loop(self):
+        """Exponential backoff reconnection loop."""
+        delay = 1.0
+        while not self._shutdown:
+            logger.warning(f"MQTT reconnecting in {delay}s...")
+            await asyncio.sleep(delay)
+
+            try:
+                # Try to connect and process messages
+                await self._handle_messages()
+
+                # If _handle_messages returns, check if we are connected
+                if self._connected:
+                    logger.info("MQTT reconnected successfully")
+                    return
+            except Exception as e:
+                logger.warning(f"Reconnection attempt failed: {e}")
+
+            delay = min(delay * 2, 60.0)
 
     async def _handle_messages(self):
-        """Main message handling loop with reconnection."""
-        while True:
-            try:
-                async with self._get_client() as client:
-                    self._client = client
-                    async for message in client.messages:
-                        await self._process_message(message)
-            except aiomqtt.MqttError as error:
-                logger.error(f'MQTT disconnected during message iteration: "{error}". Reconnecting...')
-                await asyncio.sleep(self._reconnect_interval)
-            except Exception as e:
-                logger.error(f"Unexpected error in message handler: {e}. Reconnecting...")
-                await asyncio.sleep(self._reconnect_interval)
+        """Main message handling loop."""
+        try:
+            async with self._get_client() as client:
+                self._client = client
+                await self._on_connect()
+                async for message in client.messages:
+                    await self._process_message(message)
+
+            # Normal exit (e.g. stop() called)
+            if not self._shutdown:
+                self._on_disconnect()
+        except (aiomqtt.MqttError, Exception) as error:
+            if not self._shutdown:
+                logger.error(f'MQTT connection error: "{error}"')
+                self._on_disconnect()
 
     async def _process_message(self, message):
         """Process incoming MQTT message."""
@@ -200,6 +256,9 @@ class MQTTManager:
                 if bot_id not in self._bot_controller_reports:
                     self._bot_controller_reports[bot_id] = {}
                 self._bot_controller_reports[bot_id][controller_id] = controller_report
+            
+            if self._event_bus:
+                self._event_bus.publish(BotEvent(bot_name=bot_id, event_type="performance", payload=data))
 
     async def _handle_log(self, bot_id: str, data: Any):
         """Handle log messages with deduplication."""
@@ -255,6 +314,9 @@ class MQTTManager:
             log_entry = {"level_name": "INFO", "msg": data, "timestamp": timestamp}
             self._bot_logs[bot_id].append(log_entry)
 
+        if self._event_bus:
+            self._event_bus.publish(BotEvent(bot_name=bot_id, event_type="log", payload=data))
+
     async def _handle_notify(self, bot_id: str, data: Any):
         """Handle notification messages."""
         # Store notifications if needed
@@ -262,10 +324,14 @@ class MQTTManager:
     async def _handle_status(self, bot_id: str, data: Any):
         """Handle status updates."""
         # Store latest status
+        if self._event_bus:
+            self._event_bus.publish(BotEvent(bot_name=bot_id, event_type="status", payload=data))
 
     async def _handle_heartbeat(self, bot_id: str, data: Any):
         """Handle heartbeat messages."""
         self._discovered_bots[bot_id] = time.time()  # Update last seen
+        if self._event_bus:
+            self._event_bus.publish(BotEvent(bot_name=bot_id, event_type="hb", payload=data))
 
     async def _handle_events(self, bot_id: str, data: Any):
         """Handle internal events."""
@@ -326,6 +392,7 @@ class MQTTManager:
 
     async def stop(self):
         """Stop the MQTT client."""
+        self._shutdown = True
         self._connected = False
 
         # Cancel all running tasks
@@ -508,10 +575,6 @@ class MQTTManager:
         """Clear only controller report data for a bot (useful when bot is stopped)."""
         self._bot_controller_reports.pop(bot_id, None)
 
-    @property
-    def is_connected(self) -> bool:
-        """Check if connected to MQTT broker."""
-        return self._connected
 
     def get_discovered_bots(self, timeout_seconds: int = 300) -> list:
         """Get list of auto-discovered bots.
@@ -527,15 +590,12 @@ class MQTTManager:
 
     async def subscribe_to_bot(self, bot_id: str):
         """Subscribe to all topics for a specific bot."""
-        if self._connected and self._client:
-            # Convert dots to slashes for MQTT topic
-            mqtt_bot_id = bot_id.replace(".", "/")
+        # Convert dots to slashes for MQTT topic
+        mqtt_bot_id = bot_id.replace(".", "/")
 
-            # Subscribe to all topics for this specific bot
-            topic = f"hbot/{mqtt_bot_id}/#"
-            await self._client.subscribe(topic, qos=1)
-        else:
-            logger.warning(f"Cannot subscribe to bot {bot_id} - not connected to MQTT")
+        # Subscribe to all topics for this specific bot
+        topic = f"hbot/{mqtt_bot_id}/#"
+        await self.subscribe(topic)
 
 
 if __name__ == "__main__":

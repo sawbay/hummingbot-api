@@ -1,5 +1,6 @@
 import logging
 import secrets
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated
 from urllib.parse import urlparse
@@ -52,6 +53,7 @@ from routers import (  # noqa: E402
     gateway,
     gateway_clmm,
     gateway_swap,
+    health,
     market_data,
     portfolio,
     rate_oracle,
@@ -72,6 +74,7 @@ from services.unified_connector_service import UnifiedConnectorService  # noqa: 
 from services.websocket_manager import WebSocketManager  # noqa: E402
 from utils.bot_archiver import BotArchiver  # noqa: E402
 from utils.security import BackendAPISecurity  # noqa: E402
+from utils.event_bus import EventBus  # noqa: E402
 
 # Set up logging configuration
 logging.basicConfig(
@@ -123,6 +126,10 @@ async def lifespan(app: FastAPI):
     db_manager = AsyncDatabaseManager(settings.database.url)
     await db_manager.create_tables()
     logging.info("Database initialized")
+
+    # Initialize EventBus
+    event_bus = EventBus()
+    app.state.event_bus = event_bus
 
     # Read rate oracle configuration from conf_client.yml
     from utils.file_system import FileSystemUtil
@@ -226,6 +233,7 @@ async def lifespan(app: FastAPI):
         broker_username=settings.broker.username,
         broker_password=settings.broker.password,
         broker_ssl=settings.broker.ssl,
+        event_bus=event_bus,
     )
 
     backtesting_service = BacktestingService()
@@ -275,10 +283,11 @@ async def lifespan(app: FastAPI):
 
     # WebSocket manager for executor streaming
     executor_ws_manager = ExecutorWebSocketManager(
-        executor_service, market_data_service, bots_orchestrator, docker_service
+        executor_service, market_data_service, bots_orchestrator, docker_service, event_bus=event_bus
     )
     app.state.executor_ws_manager = executor_ws_manager
 
+    app.state.start_time = time.time()
     logging.info("All services started successfully")
 
     yield
@@ -317,6 +326,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Health check endpoint (no authentication required)
+app.include_router(health.router)
 
 
 @app.exception_handler(RequestValidationError)

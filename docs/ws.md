@@ -9,13 +9,13 @@ Both use the same subscribe/unsubscribe/ping protocol and support Basic Auth.
 
 ## Authentication
 
-All WebSocket connections require authentication via one of three methods:
+All WebSocket connections require authentication via an `authenticate` message. This **must** be the very first message sent by the client after the connection is accepted.
 
-| Method | Example |
-|---|---|
-| `Authorization` header | `Authorization: Basic base64(user:pass)` |
-| `?token=` query param | `?token=base64(user:pass)` |
-| Separate query params | `?username=admin&password=admin` |
+| Action | Parameters | Example |
+|---|---|---|
+| `authenticate` | `username`, `password` | `{"action": "authenticate", "username": "admin", "password": "admin"}` |
+
+If the first message is not a valid `authenticate` message within 5 seconds, the server will close the connection with code `4403` (Forbidden).
 
 Debug mode (`DEBUG_MODE=true` in `.env`) bypasses auth.
 
@@ -28,9 +28,11 @@ Every message is a JSON object with an `action` field.
 ### Actions (client → server)
 
 ```json
-{ "action": "subscribe",   "type": "<sub_type>", ...params }
+{ "action": "authenticate", "username": "<user>", "password": "<pass>" }
+{ "action": "subscribe",    "type": "<sub_type>", ...params }
 { "action": "unsubscribe", "subscription_id": "<id>" }
 { "action": "ping" }
+{ "action": "command",     "command": "<cmd>", "bot_name": "...", "params": {...} }
 ```
 
 ### Responses (server → client)
@@ -45,6 +47,24 @@ Every message is a JSON object with an `action` field.
 ```
 
 Data is only pushed when the payload changes (hash-based change detection).
+
+---
+
+## Message Modes
+
+To optimize bandwidth, most `/ws/executors` channels support delta-based updates.
+
+| Mode | Description |
+|---|---|
+| `snapshot` | Sent as the first message of a subscription. Contains the full data state. |
+| `delta` | Sent for subsequent updates. Contains only the top-level keys that have changed. |
+| `event` | Sent for one-off occurrences (e.g., a trade). Not a state replacement. |
+| `heartbeat` | Sent if no data has changed within `update_interval * 3`. Keeps the connection alive. |
+
+**Example Heartbeat:**
+```json
+{ "type": "heartbeat", "subscription_id": "...", "timestamp": 1234567890.0 }
+```
 
 ---
 
@@ -425,8 +445,99 @@ WS connect → /ws/executors
   ← { "type": "bot_deployment", "data": { "overall_status": "running" } }
   ← { "type": "bot_deployment_resolved", "final_status": "running" }
 
-→ { "action": "subscribe", "type": "bot_status",
+→ { "action": "subscribe",   "type": "bot_status",
     "bot_name": "my-bot-20260502-090000" }   ← switch to ongoing monitoring
+
+---
+
+## Bot Commands via WebSocket
+
+You can send commands to running bots directly over the `/ws/executors` WebSocket connection. This is an asynchronous RPC-style mechanism: you send a command, receive an immediate acknowledgment (`command_ack`), and then receive the final result (`command_result`) once the operation completes.
+
+### Message Schema
+
+#### Request (client → server)
+
+```json
+{
+  "action": "command",
+  "command": "start_bot",
+  "bot_name": "my-bot-001",
+  "params": { "script": "triangular_arbitrage.py" },
+  "request_id": "req_123"
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `action` | ✅ | Must be `"command"` |
+| `command` | ✅ | One of: `start_bot`, `stop_bot`, `configure_bot`, `import_strategy`, `get_history` |
+| `bot_name` | ✅ | The name of the target bot |
+| `params` | ❌ | Dictionary of parameters for the command |
+| `request_id` | ❌ | Client-provided ID to track the response (recommended) |
+
+#### Acknowledgment (server → client)
+
+Sent immediately after the command is validated and dispatched.
+
+```json
+{
+  "type": "command_ack",
+  "request_id": "req_123",
+  "command": "start_bot",
+  "bot_name": "my-bot-001",
+  "status": "sent",
+  "message": "Command 'start_bot' dispatched to my-bot-001"
+}
+```
+
+#### Result (server → client)
+
+Sent once the bot or orchestrator completes the command.
+
+```json
+{
+  "type": "command_result",
+  "request_id": "req_123",
+  "command": "start_bot",
+  "bot_name": "my-bot-001",
+  "result": { "success": true }
+}
+```
+
+### Supported Commands
+
+#### `start_bot`
+Starts a script or controller on the bot.
+- **Params:** `script`, `conf`, `log_level`, `is_quickstart`
+
+#### `stop_bot`
+Stops the running script/controller.
+- **Params:** `skip_order_cancellation`
+
+#### `configure_bot`
+Updates bot configuration parameters.
+- **Params:** `params` (dict of config keys/values)
+
+#### `import_strategy`
+Imports a strategy configuration file.
+- **Params:** `strategy` (filename)
+
+#### `get_history`
+Fetches trading history from the bot.
+- **Params:** `days`, `verbose`, `precision`
+
+#### `start_controller`
+Starts a single controller inside the bot.
+- **Params:** `controller_id`
+
+#### `stop_controller`
+Stops a single controller inside the bot.
+- **Params:** `controller_id`
+
+#### `update_controller_config`
+Updates a single controller's configuration.
+- **Params:** `controller_id`, `params` (dict of config keys/values)
 ```
 
 ---

@@ -50,6 +50,7 @@ services/         Business logic services
   docker_service.py        Docker SDK wrapper, container health/logs
   executor_ws_manager.py   WebSocket push loops for all /ws/executors subscriptions
   websocket_manager.py     WebSocket push loops for /ws/market-data
+  backtesting_service.py   In-memory backtesting task orchestration
 models/           Pydantic request/response models
 database/
   models.py                SQLAlchemy ORM models
@@ -135,6 +136,11 @@ The API categorizes its REST endpoints using FastAPI routers. Here are the prima
 
 **Gateway & DeFi (`/gateway`, `/gateway/clmm`, `/gateway/swap`)**
 - Endpoints to interact with Decentralized Exchanges (quotes, swaps, liquidity provisions).
+
+**Backtesting (`/backtesting`)**
+- `POST /run`: Execute a backtest synchronously.
+- `POST /tasks`: Submit a background backtesting task.
+- `GET /tasks/{task_id}`: Poll for results.
 
 ---
 
