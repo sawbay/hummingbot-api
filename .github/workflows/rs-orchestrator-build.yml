@@ -11,20 +11,19 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/rs-orchestrator:latest
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/rs-orchestrator
 
 jobs:
   build_and_push:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4.1.1
 
-      - name: Extract version from main.py
+      - name: Extract version from Cargo.toml
         id: get_version
         run: |
-          VERSION=$(grep -E '^VERSION *= *' main.py | head -1 | sed -E 's/^VERSION *= *["\x27]?([^"\x27]*)["\x27]?/\1/')
+          VERSION=$(grep -E '^version *= *' rs-orchestrator/Cargo.toml | head -1 | sed -E 's/^version *= *"([^"]+)"/\1/')
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Set up QEMU
@@ -43,7 +42,8 @@ jobs:
       - name: Build and push Docker images to GHCR
         uses: docker/build-push-action@v5
         with:
-          context: .
+          context: ./rs-orchestrator
+          file: ./rs-orchestrator/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
