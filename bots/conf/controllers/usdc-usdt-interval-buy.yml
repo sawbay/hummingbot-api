@@ -1,0 +1,12 @@
+id: usdc-usdt-interval-buy
+controller_name: examples.basic_order_example
+controller_type: generic
+
+connector_name: binance_perpetual_testnet
+amount_quote: 6
+leverage: 1
+manual_kill_switch: false
+order_frequency: 60
+position_mode: ONEWAY
+side: 1
+trading_pair: APT-USDT
