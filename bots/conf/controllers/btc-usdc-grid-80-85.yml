@@ -1,0 +1,23 @@
+id: btc-usdc-grid-80-85
+controller_name: grid_strike
+controller_type: generic
+activation_bounds: 0.012
+connector_name: mexc
+end_price: 85000
+keep_position: true
+leverage: 1
+limit_price: 79500
+max_open_orders: 20
+max_orders_per_batch: 1
+min_order_amount_quote: 2
+min_spread_between_orders: 0.00125
+order_frequency: 3
+position_mode: ONEWAY
+side: 1
+start_price: 80000
+total_amount_quote: 100
+trading_pair: BTC-USDC
+triple_barrier_config:
+  open_order_type: 2
+  take_profit: 0.00125
+  take_profit_order_type: 2
