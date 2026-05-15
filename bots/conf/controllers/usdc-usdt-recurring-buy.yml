@@ -1,0 +1,11 @@
+amount_quote: 6
+connector_name: binance_perpetual_testnet
+controller_name: examples.basic_order_example
+controller_type: generic
+id: usdc-usdt-recurring-buy
+leverage: 1
+manual_kill_switch: false
+order_frequency: 60
+position_mode: ONEWAY
+side: 1
+trading_pair: APT-USDT
