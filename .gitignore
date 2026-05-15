@@ -171,6 +171,7 @@ gateway-files/
 # Hummingbot credentials and local data
 bots/credentials/
 bots/instances/
+bots/pools/
 bots/archived/
 bots/conf/scripts
 

@@ -22,6 +22,41 @@ services:
       - emqx-bridge
     depends_on:
       - postgres
+      - emqx
+
+  rs-orchestrator:
+    container_name: rs-orchestrator
+    image: ghcr.io/sawbay/rs-orchestrator:latest
+    # build:
+    #   context: ./rs-orchestrator
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./bots:/app/bots
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - ./rs-orchestrator/.env
+    networks:
+      - emqx-bridge
+    depends_on:
+      - postgres
+      - emqx
+
+  emqx:
+    container_name: hummingbot-emqx
+    image: emqx:5
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "18083:18083"
+    networks:
+      - emqx-bridge
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   postgres:
     container_name: hummingbot-postgres
     image: postgres:16
