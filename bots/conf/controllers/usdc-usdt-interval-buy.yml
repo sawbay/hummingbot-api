@@ -1,8 +1,9 @@
-amount_quote: 6
-connector_name: binance_perpetual_testnet
+id: usdc-usdt-interval-buy
 controller_name: examples.basic_order_example
 controller_type: generic
-id: usdc-usdt-recurring-buy
+
+connector_name: binance_perpetual_testnet
+amount_quote: 6
 leverage: 1
 manual_kill_switch: false
 order_frequency: 60

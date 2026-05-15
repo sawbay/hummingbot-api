@@ -1,3 +1,6 @@
+id: btc-recurring-buy
+controller_name: recurring_buy_cron
+controller_type: generic
 amount_quote: 9
 connector_name: mexc
 cron_schedule: 0 20 * * *
@@ -7,6 +10,3 @@ position_mode: ONEWAY
 side: 1
 timezone: UTC
 trading_pair: BTC-USDC
-id: btc-recurring-buy
-controller_name: recurring_buy_cron
-controller_type: generic

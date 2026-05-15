@@ -1,9 +1,9 @@
-amount_quote: 6
+id: recurring-buy
 connector_name: binance_perpetual_testnet
 controller_name: recurring_buy_cron
+amount_quote: 6
 controller_type: generic
 cron_schedule: '*/1 * * * *'
-id: recurring-buy
 leverage: 1
 manual_kill_switch: false
 position_mode: ONEWAY
