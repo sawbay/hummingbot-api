@@ -12,6 +12,7 @@ from services.trading_service import TradingService
 from services.unified_connector_service import UnifiedConnectorService
 from services.backtesting_service import BacktestingService
 from services.websocket_manager import WebSocketManager
+from services.r2_storage_service import R2BotsStorageService
 from utils.bot_archiver import BotArchiver
 
 
@@ -78,3 +79,7 @@ def get_backtesting_service(request: Request) -> BacktestingService:
 def get_websocket_manager(request: Request) -> WebSocketManager:
     """Get WebSocketManager from app state."""
     return request.app.state.websocket_manager
+
+def get_r2_storage_service(request: Request) -> R2BotsStorageService:
+    """Get R2BotsStorageService from app state."""
+    return request.app.state.r2_storage_service

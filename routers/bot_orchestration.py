@@ -8,6 +8,7 @@ import yaml
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
+from config import settings
 from database import AsyncDatabaseManager, BotRunRepository
 from deps import get_bot_archiver, get_bots_orchestrator, get_database_manager, get_docker_service
 from models import StartBotAction, StopBotAction, V2ControllerDeployment, V2ScriptDeployment
@@ -29,6 +30,42 @@ router = APIRouter(tags=["Bot Orchestration"], prefix="/bot-orchestration")
 _DEPLOY_HEALTH_CHECK_TIMEOUT = 60
 # Interval (seconds) between container status polls during the health check.
 _DEPLOY_HEALTH_CHECK_INTERVAL = 3
+
+def _r2_key(path: str) -> str:
+    prefix = settings.r2.prefix.strip("/")
+    clean_path = path.strip("/")
+    return f"{prefix}/{clean_path}" if prefix else clean_path
+
+def _build_orchestration_payload(
+    *,
+    instance_name: str,
+    strategy_type: str,
+    strategy_name: str,
+    credentials_profile: str,
+    script_config: str | None,
+    controllers_config: list[str],
+    deployment_config: dict,
+) -> dict:
+    return {
+        "request_id": f"orch-{instance_name}",
+        "instance_name": instance_name,
+        "strategy_type": strategy_type,
+        "strategy_name": strategy_name,
+        "credentials_profile": credentials_profile,
+        "script_config": script_config,
+        "controllers_config": controllers_config,
+        "r2": {
+            "prefix": settings.r2.prefix,
+            "keys": {
+                "credential_profile": _r2_key(f"credentials/{credentials_profile}/"),
+                "script_config": _r2_key(f"conf/scripts/{script_config}") if script_config else None,
+                "controllers": [_r2_key(f"conf/controllers/{controller}") for controller in controllers_config],
+                "scripts_runtime": None,
+                "controllers_runtime": None,
+            },
+        },
+        "deployment_config": deployment_config,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -797,8 +834,6 @@ async def update_controller_config(
 @router.post("/deploy-v2-controllers")
 async def deploy_v2_controllers(
     deployment: V2ControllerDeployment,
-    background_tasks: BackgroundTasks,
-    docker_manager: DockerService = Depends(get_docker_service),
     bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
     db_manager: AsyncDatabaseManager = Depends(get_database_manager)
 ):
@@ -861,52 +896,68 @@ async def deploy_v2_controllers(
 
         logging.info(f"Generated script config: {script_config_filename} with content: {script_config_content}")
 
-        # Set generated config on the deployment and deploy
+        # Set generated config on the deployment and queue orchestration
         deployment.instance_name = unique_instance_name
         deployment.script_config = script_config_filename
-        response = docker_manager.create_hummingbot_instance(deployment)
+        deployment_config = deployment.dict()
 
-        if response.get("success"):
-            response["script_config_generated"] = script_config_filename
-            response["controllers_deployed"] = deployment.controllers_config
-            response["unique_instance_name"] = unique_instance_name
+        # Register the bot as deploying so it shows up in status immediately
+        bots_manager.register_pending_bot(
+            unique_instance_name,
+            {"strategy": "v2_with_controllers", "account": deployment.credentials_profile}
+        )
 
-            # Register the bot as deploying so it shows up in status immediately
-            bots_manager.register_pending_bot(
-                unique_instance_name,
-                {"strategy": "v2_with_controllers", "account": deployment.credentials_profile}
-            )
+        try:
+            async with db_manager.get_session_context() as session:
+                bot_run_repo = BotRunRepository(session)
+                await bot_run_repo.create_bot_run(
+                    bot_name=unique_instance_name,
+                    instance_name=unique_instance_name,
+                    strategy_type="controller",
+                    strategy_name="v2_with_controllers",
+                    account_name=deployment.credentials_profile,
+                    config_name=script_config_filename,
+                    image_version=deployment.image,
+                    deployment_config=deployment_config
+                )
+                logger.info(f"Created queued bot run record for controller deployment {unique_instance_name}")
+        except Exception as e:
+            logger.error(f"Failed to create bot run record: {e}")
+            bots_manager.mark_pending_bot_failed(unique_instance_name, str(e))
+            raise HTTPException(status_code=500, detail=f"Failed to create bot run record: {e}")
 
-            # Track bot run if deployment was successful
+        orchestration_payload = _build_orchestration_payload(
+            instance_name=unique_instance_name,
+            strategy_type="controller",
+            strategy_name="v2_with_controllers",
+            credentials_profile=deployment.credentials_profile,
+            script_config=script_config_filename,
+            controllers_config=controllers_with_extension,
+            deployment_config=deployment_config,
+        )
+        published = await bots_manager.publish_orchestration_request(orchestration_payload)
+        if not published:
+            error_msg = "Failed to publish orchestration request to orchestrate/deploy"
+            bots_manager.mark_pending_bot_failed(unique_instance_name, error_msg)
             try:
                 async with db_manager.get_session_context() as session:
                     bot_run_repo = BotRunRepository(session)
-                    await bot_run_repo.create_bot_run(
-                        bot_name=unique_instance_name,
-                        instance_name=unique_instance_name,
-                        strategy_type="controller",
-                        strategy_name="v2_with_controllers",
-                        account_name=deployment.credentials_profile,
-                        config_name=script_config_filename,
-                        image_version=deployment.image,
-                        deployment_config=deployment.dict()
-                    )
-                    logger.info(f"Created bot run record for controller deployment {unique_instance_name}")
-            except Exception as e:
-                logger.error(f"Failed to create bot run record: {e}")
-                # Don't fail the deployment if bot run creation fails
+                    await bot_run_repo.update_orchestration_failed(unique_instance_name, error_msg)
+            except Exception as db_err:
+                logger.error(f"Failed to update failed orchestration BotRun: {db_err}")
+            raise HTTPException(status_code=503, detail=error_msg)
 
-            # Start background health check
-            background_tasks.add_task(
-                _post_deploy_health_check,
-                instance_name=unique_instance_name,
-                docker_manager=docker_manager,
-                bots_manager=bots_manager,
-                db_manager=db_manager,
-            )
+        return {
+            "success": True,
+            "message": f"Deployment {unique_instance_name} queued for rs-orchestrator.",
+            "unique_instance_name": unique_instance_name,
+            "script_config_generated": script_config_filename,
+            "controllers_deployed": controllers_with_extension,
+            "orchestration_status": "queued",
+        }
 
-        return response
-
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"Error deploying V2 controllers: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -915,8 +966,6 @@ async def deploy_v2_controllers(
 @router.post("/deploy-v2-script")
 async def deploy_v2_script(
     deployment: V2ScriptDeployment,
-    background_tasks: BackgroundTasks,
-    docker_manager: DockerService = Depends(get_docker_service),
     bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
     db_manager: AsyncDatabaseManager = Depends(get_database_manager)
 ):
@@ -952,48 +1001,69 @@ async def deploy_v2_script(
         # Update deployment with unique name
         deployment.instance_name = unique_instance_name
 
-        # Create the hummingbot instance
-        response = docker_manager.create_hummingbot_instance(deployment)
+        deployment_config = deployment.dict()
+        controllers_with_extension = []
+        if deployment.script_config:
+            try:
+                script_config_content = fs_util.read_yaml_file(f"conf/scripts/{deployment.script_config}")
+                controllers_with_extension = script_config_content.get("controllers_config", []) or []
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to read script config controllers: {e}")
 
-        if response.get("success"):
-            response["unique_instance_name"] = unique_instance_name
+        bots_manager.register_pending_bot(
+            unique_instance_name,
+            {"strategy": deployment.script or "default", "account": deployment.credentials_profile}
+        )
 
-            # Register the bot as deploying so it shows up in status immediately
-            bots_manager.register_pending_bot(
-                unique_instance_name,
-                {"strategy": deployment.script or "default", "account": deployment.credentials_profile}
-            )
+        try:
+            async with db_manager.get_session_context() as session:
+                bot_run_repo = BotRunRepository(session)
+                await bot_run_repo.create_bot_run(
+                    bot_name=unique_instance_name,
+                    instance_name=unique_instance_name,
+                    strategy_type="script",
+                    strategy_name=deployment.script or "default",
+                    account_name=deployment.credentials_profile,
+                    config_name=deployment.script_config,
+                    image_version=deployment.image,
+                    deployment_config=deployment_config
+                )
+                logger.info(f"Created queued bot run record for script deployment {unique_instance_name}")
+        except Exception as e:
+            logger.error(f"Failed to create bot run record: {e}")
+            bots_manager.mark_pending_bot_failed(unique_instance_name, str(e))
+            raise HTTPException(status_code=500, detail=f"Failed to create bot run record: {e}")
 
-            # Track bot run if deployment was successful
+        orchestration_payload = _build_orchestration_payload(
+            instance_name=unique_instance_name,
+            strategy_type="script",
+            strategy_name=deployment.script or "default",
+            credentials_profile=deployment.credentials_profile,
+            script_config=deployment.script_config,
+            controllers_config=controllers_with_extension,
+            deployment_config=deployment_config,
+        )
+        published = await bots_manager.publish_orchestration_request(orchestration_payload)
+        if not published:
+            error_msg = "Failed to publish orchestration request to orchestrate/deploy"
+            bots_manager.mark_pending_bot_failed(unique_instance_name, error_msg)
             try:
                 async with db_manager.get_session_context() as session:
                     bot_run_repo = BotRunRepository(session)
-                    await bot_run_repo.create_bot_run(
-                        bot_name=unique_instance_name,
-                        instance_name=unique_instance_name,
-                        strategy_type="script",
-                        strategy_name=deployment.script or "default",
-                        account_name=deployment.credentials_profile,
-                        config_name=deployment.script_config,
-                        image_version=deployment.image,
-                        deployment_config=deployment.dict()
-                    )
-                    logger.info(f"Created bot run record for script deployment {unique_instance_name}")
-            except Exception as e:
-                logger.error(f"Failed to create bot run record: {e}")
-                # Don't fail the deployment if bot run creation fails
+                    await bot_run_repo.update_orchestration_failed(unique_instance_name, error_msg)
+            except Exception as db_err:
+                logger.error(f"Failed to update failed orchestration BotRun: {db_err}")
+            raise HTTPException(status_code=503, detail=error_msg)
 
-            # Start background health check
-            background_tasks.add_task(
-                _post_deploy_health_check,
-                instance_name=unique_instance_name,
-                docker_manager=docker_manager,
-                bots_manager=bots_manager,
-                db_manager=db_manager,
-            )
+        return {
+            "success": True,
+            "message": f"Deployment {unique_instance_name} queued for rs-orchestrator.",
+            "unique_instance_name": unique_instance_name,
+            "orchestration_status": "queued",
+        }
 
-        return response
-
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"Error deploying V2 script: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

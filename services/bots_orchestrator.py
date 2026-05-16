@@ -9,6 +9,9 @@ from utils.mqtt_manager import MQTTManager
 
 logger = logging.getLogger(__name__)
 
+ORCHESTRATE_DEPLOY_TOPIC = "orchestrate/deploy"
+ORCHESTRATE_STATUS_TOPIC = "orchestrate/status"
+
 
 # HummingbotPerformanceListener class is no longer needed
 # All functionality is now handled by MQTTManager
@@ -50,6 +53,62 @@ class BotsOrchestrator:
         self.pending_bots: dict = {}
 
         # MQTT manager will be started asynchronously later
+
+    def configure_orchestration_status_handler(self, db_manager):
+        """Subscribe to rs-orchestrator status callbacks for queued deployments."""
+        async def handle_status(_bot_id: str, _channel: str, data: dict):
+            if not isinstance(data, dict):
+                logger.warning(f"Ignoring malformed orchestration status payload: {data}")
+                return
+
+            instance_name = data.get("instance_name")
+            status = data.get("status")
+            runtime_bot_name = data.get("bot_name")
+            error = data.get("error")
+
+            if not instance_name or not status:
+                logger.warning(f"Ignoring incomplete orchestration status payload: {data}")
+                return
+
+            if status in ("reserved", "hydrating", "configuring"):
+                if instance_name in self.pending_bots:
+                    self.pending_bots[instance_name]["status"] = status
+                    self.pending_bots[instance_name]["runtime_bot_name"] = runtime_bot_name
+                return
+
+            from database import BotRunRepository
+
+            if status == "running":
+                self.active_bots[instance_name] = {
+                    "bot_name": instance_name,
+                    "status": "connected",
+                    "source": "rs-orchestrator",
+                    "runtime_bot_name": runtime_bot_name,
+                }
+                self.resolve_pending_bot(instance_name)
+                try:
+                    async with db_manager.get_session_context() as session:
+                        repo = BotRunRepository(session)
+                        await repo.update_orchestration_running(instance_name, runtime_bot_name)
+                except Exception as db_err:
+                    logger.error(f"Failed to mark orchestration running for {instance_name}: {db_err}", exc_info=True)
+                return
+
+            if status == "failed":
+                error_message = error or "rs-orchestrator reported deployment failure"
+                self.mark_pending_bot_failed(instance_name, error_message)
+                try:
+                    async with db_manager.get_session_context() as session:
+                        repo = BotRunRepository(session)
+                        await repo.update_orchestration_failed(instance_name, error_message)
+                except Exception as db_err:
+                    logger.error(f"Failed to mark orchestration failed for {instance_name}: {db_err}", exc_info=True)
+
+        self.mqtt_manager.add_handler(ORCHESTRATE_STATUS_TOPIC, handle_status)
+
+    async def publish_orchestration_request(self, payload: dict) -> bool:
+        """Publish a queued deployment request to the Rust orchestrator."""
+        return await self.mqtt_manager.publish_raw(ORCHESTRATE_DEPLOY_TOPIC, payload)
 
     @staticmethod
     def hummingbot_containers_fiter(container):

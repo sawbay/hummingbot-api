@@ -94,6 +94,28 @@ DATABASE_URL=...            # PostgreSQL connection
 GATEWAY_URL=...             # Gateway URL (for DEX)
 ```
 
+Optional Cloudflare R2 sync for durable bot files:
+
+```bash
+R2_ENABLED=false
+R2_BUCKET=...
+R2_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_PREFIX=bots
+R2_SYNC_ON_STARTUP=false
+```
+
+When enabled, the API syncs only durable bot files under `bots/credentials` and `bots/conf`. Runtime directories and source folders such as `bots/instances`, `bots/pools`, `bots/controllers`, `bots/scripts`, logs, data, archives, `.gitignore`, and `.dockerignore` remain local.
+
+R2 manual sync endpoints:
+
+```bash
+GET  /storage/r2/status
+POST /storage/r2/pull   # starts a background pull job and returns immediately
+POST /storage/r2/push   # starts a background push job and returns immediately
+```
+
 Edit `.env` and restart with `make deploy` to apply changes.
 
 ## API Features

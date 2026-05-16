@@ -171,8 +171,10 @@ gateway-files/
 # Hummingbot credentials and local data
 bots/credentials/
 bots/instances/
+bots/pools/
 bots/archived/
 bots/conf/scripts
+bots/.r2_sync_manifest.json
 
 # Local MCP configuration (project-specific overrides)
 .mcp.json

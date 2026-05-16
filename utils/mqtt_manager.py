@@ -62,6 +62,7 @@ class MQTTManager:
             "hbot/+/hb",
             "hbot/+/performance",
             "hbot/+/external/event/+",
+            "orchestrate/status",
             "hummingbot-api/response/+",
         }
 
@@ -172,11 +173,25 @@ class MQTTManager:
         """Process incoming MQTT message."""
         try:
             topic = str(message.topic)
+            try:
+                generic_data = json.loads(message.payload.decode("utf-8"))
+            except json.JSONDecodeError:
+                generic_data = message.payload.decode("utf-8")
 
             # Check if this is an RPC response to our hummingbot-api
             if topic.startswith("hummingbot-api/response/"):
                 await self._handle_rpc_response(topic, message)
                 return
+
+            for pattern, handler in self._handlers.items():
+                if self._match_topic(pattern, topic):
+                    topic_parts_for_handler = topic.split("/")
+                    bot_id = topic_parts_for_handler[1] if len(topic_parts_for_handler) > 1 else ""
+                    channel = "/".join(topic_parts_for_handler[2:]) if len(topic_parts_for_handler) > 2 else ""
+                    if asyncio.iscoroutinefunction(handler):
+                        await handler(bot_id, channel, generic_data)
+                    else:
+                        await asyncio.get_event_loop().run_in_executor(None, handler, bot_id, channel, generic_data)
 
             topic_parts = topic.split("/")
 
@@ -187,11 +202,7 @@ class MQTTManager:
                 if namespace == "hbot":
                     # Auto-discover bot
                     self._discovered_bots[bot_id] = time.time()
-                    # Parse message
-                    try:
-                        data = json.loads(message.payload.decode("utf-8"))
-                    except json.JSONDecodeError:
-                        data = message.payload.decode("utf-8")
+                    data = generic_data
 
                     # Route to appropriate handler based on Hummingbot's topics
                     if channel == "log":
@@ -216,14 +227,6 @@ class MQTTManager:
                     else:
                         logger.info(f"Unknown channel '{channel}' for bot {bot_id}")
 
-                    # Call custom handlers
-                    for pattern, handler in self._handlers.items():
-                        if self._match_topic(pattern, topic):
-                            if asyncio.iscoroutinefunction(handler):
-                                await handler(bot_id, channel, data)
-                            else:
-                                # Run sync handler in executor
-                                await asyncio.get_event_loop().run_in_executor(None, handler, bot_id, channel, data)
         except Exception as e:
             logger.error(f"Error processing message from {message.topic}: {e}", exc_info=True)
 
@@ -532,6 +535,19 @@ class MQTTManager:
             return True
         except Exception as e:
             logger.error(f"Failed to publish command to {bot_id}: {e}")
+            return False
+
+    async def publish_raw(self, topic: str, data: Dict[str, Any], qos: int = 1) -> bool:
+        """Publish a raw JSON payload to an arbitrary MQTT topic."""
+        if not self._connected or not self._client:
+            logger.error("Not connected to MQTT broker")
+            return False
+
+        try:
+            await self._client.publish(topic, payload=json.dumps(data), qos=qos)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to publish raw MQTT message to {topic}: {e}")
             return False
 
     def add_handler(self, topic_pattern: str, handler: Callable):
