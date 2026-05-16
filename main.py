@@ -58,6 +58,7 @@ from routers import (  # noqa: E402
     portfolio,
     rate_oracle,
     scripts,
+    storage,
     trading,
     websocket,
 )
@@ -69,6 +70,7 @@ from services.executor_ws_manager import ExecutorWebSocketManager  # noqa: E402
 from services.backtesting_service import BacktestingService  # noqa: E402
 from services.gateway_service import GatewayService  # noqa: E402
 from services.market_data_service import MarketDataService  # noqa: E402
+from services.r2_storage_service import R2BotsStorageService  # noqa: E402
 from services.trading_service import TradingService  # noqa: E402
 from services.unified_connector_service import UnifiedConnectorService  # noqa: E402
 from services.websocket_manager import WebSocketManager  # noqa: E402
@@ -100,6 +102,28 @@ async def lifespan(app: FastAPI):
     Lifespan context manager for the FastAPI application.
     Handles startup and shutdown events.
     """
+    from utils.file_system import FileSystemUtil
+    fs_util = FileSystemUtil()
+
+    r2_storage_service = R2BotsStorageService(
+        enabled=settings.r2.enabled,
+        bucket=settings.r2.bucket,
+        endpoint_url=settings.r2.endpoint_url,
+        access_key_id=settings.r2.access_key_id,
+        secret_access_key=settings.r2.secret_access_key,
+        prefix=settings.r2.prefix,
+        bots_root=fs_util.base_path,
+    )
+    fs_util.set_storage_service(r2_storage_service)
+
+    if settings.r2.enabled and settings.r2.sync_on_startup:
+        result = r2_storage_service.pull_durable_prefixes()
+        if not result.success:
+            raise RuntimeError(f"R2 startup pull failed: {result.errors}")
+        logging.info("R2 startup pull completed: %s", result.to_dict())
+    else:
+        r2_storage_service.ensure_local_directories()
+
     # Ensure password verification file exists
     if BackendAPISecurity.new_password_required():
         # Create secrets manager with CONFIG_PASSWORD
@@ -132,9 +156,6 @@ async def lifespan(app: FastAPI):
     app.state.event_bus = event_bus
 
     # Read rate oracle configuration from conf_client.yml
-    from utils.file_system import FileSystemUtil
-    fs_util = FileSystemUtil()
-
     try:
         conf_client_path = "credentials/master_account/conf_client.yml"
         config_data = fs_util.read_yaml_file(conf_client_path)
@@ -280,6 +301,7 @@ async def lifespan(app: FastAPI):
     app.state.docker_service = docker_service
     app.state.gateway_service = gateway_service
     app.state.bot_archiver = bot_archiver
+    app.state.r2_storage_service = r2_storage_service
 
     # WebSocket manager for executor streaming
     executor_ws_manager = ExecutorWebSocketManager(
@@ -395,6 +417,7 @@ app.include_router(gateway_clmm.router, dependencies=[Depends(auth_user)])
 app.include_router(bot_orchestration.router, dependencies=[Depends(auth_user)])
 app.include_router(controllers.router, dependencies=[Depends(auth_user)])
 app.include_router(scripts.router, dependencies=[Depends(auth_user)])
+app.include_router(storage.router, dependencies=[Depends(auth_user)])
 app.include_router(market_data.router, dependencies=[Depends(auth_user)])
 app.include_router(rate_oracle.router, dependencies=[Depends(auth_user)])
 app.include_router(backtesting.router, dependencies=[Depends(auth_user)])

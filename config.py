@@ -81,6 +81,19 @@ class AWSSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="AWS_", extra="ignore")
 
+class R2Settings(BaseSettings):
+    """Cloudflare R2 configuration for durable bots file storage."""
+
+    enabled: bool = Field(default=False, description="Enable R2 sync for durable bots files")
+    bucket: str = Field(default="", description="R2 bucket name")
+    endpoint_url: str = Field(default="", description="R2 S3-compatible endpoint URL")
+    access_key_id: str = Field(default="", description="R2 access key ID")
+    secret_access_key: str = Field(default="", description="R2 secret access key")
+    prefix: str = Field(default="bots", description="Object key prefix for bots files")
+    sync_on_startup: bool = Field(default=True, description="Pull durable bots files from R2 on startup")
+
+    model_config = SettingsConfigDict(env_prefix="R2_", extra="ignore")
+
 
 class GatewaySettings(BaseSettings):
     """Gateway service configuration."""
@@ -129,6 +142,7 @@ class Settings(BaseSettings):
     market_data: MarketDataSettings = Field(default_factory=MarketDataSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     aws: AWSSettings = Field(default_factory=AWSSettings)
+    r2: R2Settings = Field(default_factory=R2Settings)
     gateway: GatewaySettings = Field(default_factory=GatewaySettings)
     app: AppSettings = Field(default_factory=AppSettings)
 

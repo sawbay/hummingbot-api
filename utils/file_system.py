@@ -28,6 +28,7 @@ class FileSystemUtil:
     """
     _instance = None
     base_path: str = "bots"  # Default base path
+    storage_service = None
 
     def __new__(cls, base_path: Optional[str] = None):
         if cls._instance is None:
@@ -50,6 +51,26 @@ class FileSystemUtil:
         :return: Full absolute path.
         """
         return path if os.path.isabs(path) else os.path.join(self.base_path, path)
+
+    def set_storage_service(self, storage_service) -> None:
+        """Attach an optional durable storage sync backend."""
+        self.storage_service = storage_service
+
+    def _sync_file_upload(self, path: str) -> None:
+        if self.storage_service:
+            self.storage_service.upload_file(path)
+
+    def _sync_tree_upload(self, path: str) -> None:
+        if self.storage_service:
+            self.storage_service.upload_tree(path)
+
+    def _sync_path_delete(self, path: str) -> None:
+        if self.storage_service:
+            self.storage_service.delete_path(path)
+
+    def _sync_tree_delete(self, path: str) -> None:
+        if self.storage_service:
+            self.storage_service.delete_tree(path)
 
     def list_files(self, directory: str) -> List[str]:
         """
@@ -112,6 +133,7 @@ class FileSystemUtil:
             raise NotADirectoryError(f"Source path '{src}' is not a directory")
 
         shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
+        self._sync_tree_upload(dest_path)
 
     def copy_file(self, src: str, dest: str) -> None:
         """
@@ -134,6 +156,7 @@ class FileSystemUtil:
         os.makedirs(dest_dir, exist_ok=True)
 
         shutil.copy2(src_path, dest_path)
+        self._sync_file_upload(dest_path)
 
     def delete_folder(self, directory: str, folder_name: str) -> None:
         """
@@ -149,6 +172,7 @@ class FileSystemUtil:
         if not os.path.isdir(folder_path):
             raise NotADirectoryError(f"Path '{folder_name}' is not a directory")
         shutil.rmtree(folder_path)
+        self._sync_tree_delete(folder_path)
 
     def delete_file(self, directory: str, file_name: str) -> None:
         """
@@ -164,6 +188,7 @@ class FileSystemUtil:
         if os.path.isdir(file_path):
             raise IsADirectoryError(f"Path '{file_name}' is a directory, not a file")
         os.remove(file_path)
+        self._sync_path_delete(file_path)
 
     def path_exists(self, path: str) -> bool:
         """
@@ -196,6 +221,7 @@ class FileSystemUtil:
 
         with open(file_path, 'w', encoding='utf-8') as file:
             file.write(content)
+        self._sync_file_upload(file_path)
 
     def append_to_file(self, directory: str, file_name: str, content: str) -> None:
         """
@@ -244,6 +270,7 @@ class FileSystemUtil:
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, 'w', encoding='utf-8') as file:
             yaml.dump(data_dict, file, default_flow_style=False, allow_unicode=True)
+        self._sync_file_upload(file_path)
 
     def read_yaml_file(self, file_path: str) -> dict:
         """
@@ -340,6 +367,7 @@ class FileSystemUtil:
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w", encoding='utf-8') as f:
             f.write(text)
+        self._sync_file_upload(full_path)
 
     def get_connector_keys_path(self, account_name: str, connector_name: str) -> Path:
         """
@@ -363,6 +391,7 @@ class FileSystemUtil:
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w", encoding="utf-8") as outfile:
                 outfile.write(cm_yml_str)
+            self._sync_file_upload(full_path)
         except Exception as e:
             logger.error(f"Error writing configs to '{yml_path}': {e}", exc_info=True)
             raise
