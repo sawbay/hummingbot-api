@@ -184,15 +184,23 @@ impl Orchestrator {
         if let Some(script_config_name) = script_config_name {
             import_payload["conf"] = json!(script_config_name);
         }
-        let _ = self
+        let import_response = self
             .mqtt
             .publish_command_and_wait(
                 bot_name,
-                "import_strategy",
+                "import",
                 import_payload,
                 self.settings.command_timeout(),
             )
             .await?;
+        if import_response.is_none() {
+            tracing::warn!(
+                bot_name = %bot_name,
+                script = %script_file_name,
+                conf = ?script_config_name,
+                "timed out waiting for import response; continuing to start"
+            );
+        }
 
         let mut start_payload = json!({
             "log_level": "INFO",
@@ -219,6 +227,13 @@ impl Orchestrator {
     }
 
     async fn handle_orchestration_request(&self, request: OrchestrationRequest) {
+        tracing::info!(
+            request_id = %request.request_id,
+            instance_name = %request.instance_name,
+            strategy_type = %request.strategy_type,
+            strategy_name = %request.strategy_name,
+            "processing orchestration request"
+        );
         if let Err(err) = self
             .deploy_from_orchestration_request(request.clone())
             .await
@@ -237,6 +252,12 @@ impl Orchestrator {
         let slot = self.slots.reserve_idle().await.ok_or_else(|| {
             AppError::Conflict("No idle warm-pool slots are available".to_string())
         })?;
+        tracing::info!(
+            request_id = %request.request_id,
+            instance_name = %request.instance_name,
+            bot_name = %slot.bot_name,
+            "reserved warm-pool slot for orchestration request"
+        );
         self.publish_orchestration_status(&request, Some(&slot.bot_name), "reserved", None)
             .await
             .map_err(|err| AppError::Internal(err.into()))?;
@@ -246,6 +267,12 @@ impl Orchestrator {
             .map_err(|err| AppError::Internal(err.into()))?;
 
         let keys = request.r2.keys.flatten();
+        tracing::info!(
+            request_id = %request.request_id,
+            bot_name = %slot.bot_name,
+            key_count = keys.len(),
+            "hydrating orchestration files from R2/local storage"
+        );
         if let Err(err) = self.r2.hydrate_keys(&keys).await {
             let error = err.to_string();
             self.slots.mark_error(&slot.bot_name, error.clone()).await;
@@ -291,8 +318,22 @@ impl Orchestrator {
         self.publish_orchestration_status(&request, Some(&slot.bot_name), "configuring", None)
             .await
             .map_err(|err| AppError::Internal(err.into()))?;
+        tracing::info!(
+            request_id = %request.request_id,
+            bot_name = %slot.bot_name,
+            script_config = ?request.script_config,
+            controllers = ?request.controllers_config,
+            "copied orchestration files into warm-pool slot"
+        );
 
         let script_file_name = script_file_name_for_request(&request);
+        tracing::info!(
+            request_id = %request.request_id,
+            bot_name = %slot.bot_name,
+            script = %script_file_name,
+            conf = ?request.script_config,
+            "starting strategy on warm-pool bot"
+        );
         if let Err(err) = self
             .import_and_start(
                 &slot.bot_name,
@@ -321,6 +362,12 @@ impl Orchestrator {
         self.publish_orchestration_status(&request, Some(&slot.bot_name), "running", None)
             .await
             .map_err(|err| AppError::Internal(err.into()))?;
+        tracing::info!(
+            request_id = %request.request_id,
+            instance_name = %request.instance_name,
+            bot_name = %slot.bot_name,
+            "orchestration request is running"
+        );
         Ok(())
     }
 

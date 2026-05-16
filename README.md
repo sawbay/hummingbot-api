@@ -103,10 +103,10 @@ R2_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
 R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
 R2_PREFIX=bots
-R2_SYNC_ON_STARTUP=true
+R2_SYNC_ON_STARTUP=false
 ```
 
-When enabled, the API syncs only durable bot files: `bots/credentials`, `bots/conf`, `bots/controllers`, and `bots/scripts`. Runtime directories such as `bots/instances`, `bots/pools`, logs, data, and archives remain local.
+When enabled, the API syncs only durable bot files under `bots/credentials` and `bots/conf`. Runtime directories and source folders such as `bots/instances`, `bots/pools`, `bots/controllers`, `bots/scripts`, logs, data, archives, `.gitignore`, and `.dockerignore` remain local.
 
 R2 manual sync endpoints:
 

@@ -1,4 +1,6 @@
 import logging
+import json
+import hashlib
 import os
 import threading
 import time
@@ -40,8 +42,9 @@ class R2SyncResult:
 class R2BotsStorageService:
     """S3-compatible storage service for durable files under bots/."""
 
-    DURABLE_PREFIXES = ("credentials", "conf", "controllers", "scripts")
-    EXCLUDED_PREFIXES = ("instances", "pools", "archived", "data", "logs")
+    DURABLE_PREFIXES = ("credentials", "conf")
+    EXCLUDED_PREFIXES = ("instances", "pools", "archived", "data", "logs", "controllers", "scripts")
+    EXCLUDED_FILES = (".gitignore", ".dockerignore")
 
     def __init__(
         self,
@@ -63,6 +66,7 @@ class R2BotsStorageService:
         self.last_sync_result: dict | None = None
         self.current_job: dict | None = None
         self._job_lock = threading.Lock()
+        self._manifest_path = self.bots_root / ".r2_sync_manifest.json"
 
         if self.enabled and self._client is None:
             self._validate_config()
@@ -100,6 +104,7 @@ class R2BotsStorageService:
             "bots_root": str(self.bots_root),
             "durable_prefixes": list(self.DURABLE_PREFIXES),
             "excluded_prefixes": list(self.EXCLUDED_PREFIXES),
+            "excluded_files": list(self.EXCLUDED_FILES),
             "last_sync_result": self.last_sync_result,
             "current_job": self.current_job,
         }
@@ -154,6 +159,8 @@ class R2BotsStorageService:
         relative = self.to_relative_path(path)
         if not relative:
             return False
+        if len(relative.parts) == 1 and relative.parts[0] in self.EXCLUDED_FILES:
+            return False
         first = relative.parts[0]
         return first in self.DURABLE_PREFIXES and first not in self.EXCLUDED_PREFIXES
 
@@ -188,6 +195,7 @@ class R2BotsStorageService:
         if not full_path.is_file():
             return False
         self.client.upload_file(str(full_path), self.bucket, key)
+        self._record_uploaded_file(key, full_path)
         logger.info("Uploaded durable bots file to R2: %s -> %s", full_path, key)
         return True
 
@@ -218,6 +226,7 @@ class R2BotsStorageService:
         if not key:
             return False
         self.client.delete_object(Bucket=self.bucket, Key=key)
+        self._remove_manifest_entry(key)
         logger.info("Deleted durable bots object from R2: %s", key)
         return True
 
@@ -231,6 +240,7 @@ class R2BotsStorageService:
         for key in self.list_keys(prefix):
             try:
                 self.client.delete_object(Bucket=self.bucket, Key=key)
+                self._remove_manifest_entry(key)
                 result.deleted += 1
             except Exception as exc:
                 result.errors.append(f"{key}: {exc}")
@@ -244,20 +254,47 @@ class R2BotsStorageService:
             self.last_sync_result = result.to_dict()
             return result
         self.ensure_local_directories()
+        logger.info(
+            "R2 pull started: bucket=%s prefix=%s durable_prefixes=%s excluded_prefixes=%s excluded_files=%s",
+            self.bucket,
+            self.prefix,
+            self.DURABLE_PREFIXES,
+            self.EXCLUDED_PREFIXES,
+            self.EXCLUDED_FILES,
+        )
+        manifest = self._load_manifest()
+        manifest_changed = False
         for durable_prefix in self.DURABLE_PREFIXES:
             object_prefix = self._object_prefix(durable_prefix)
-            for key in self.list_keys(object_prefix):
+            logger.info("R2 pull scanning prefix: %s", object_prefix)
+            for item in self.list_objects(object_prefix):
+                key = item.get("Key")
+                if not key or key.endswith("/"):
+                    continue
                 relative = self._relative_from_key(key)
                 if relative is None or not self.is_durable_path(relative):
                     result.skipped += 1
                     continue
                 destination = self.bots_root / relative
+                remote_entry = self._manifest_entry_from_object(item)
                 try:
+                    if self._local_matches_remote(destination, manifest.get(key), remote_entry):
+                        result.skipped += 1
+                        logger.debug("R2 pull skipped unchanged object: %s", key)
+                        continue
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     self.client.download_file(self.bucket, key, str(destination))
+                    remote_entry["sha256"] = self._sha256_file(destination)
+                    manifest[key] = remote_entry
+                    manifest_changed = True
                     result.downloaded += 1
+                    logger.info("R2 pull downloaded: %s -> %s", key, destination)
                 except Exception as exc:
                     result.errors.append(f"{key}: {exc}")
+                    logger.error("R2 pull failed for %s: %s", key, exc)
+        if manifest_changed:
+            self._save_manifest(manifest)
+        logger.info("R2 pull finished: %s", result.to_dict())
         self.last_sync_result = result.to_dict()
         return result
 
@@ -280,13 +317,17 @@ class R2BotsStorageService:
         self.last_sync_result = result.to_dict()
         return result
 
-    def list_keys(self, prefix: str) -> Iterable[str]:
+    def list_objects(self, prefix: str) -> Iterable[dict]:
         paginator = self.client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
             for item in page.get("Contents", []):
-                key = item.get("Key")
-                if key and not key.endswith("/"):
-                    yield key
+                yield item
+
+    def list_keys(self, prefix: str) -> Iterable[str]:
+        for item in self.list_objects(prefix):
+            key = item.get("Key")
+            if key and not key.endswith("/"):
+                yield key
 
     def ensure_local_directories(self) -> None:
         for prefix in (*self.DURABLE_PREFIXES, *self.EXCLUDED_PREFIXES):
@@ -324,3 +365,82 @@ class R2BotsStorageService:
         if key_prefix and not key.startswith(key_prefix):
             return None
         return self.to_relative_path(key[len(key_prefix):])
+
+    def _load_manifest(self) -> dict:
+        if not self._manifest_path.is_file():
+            return {}
+        try:
+            with self._manifest_path.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            logger.warning("Failed to read R2 sync manifest %s: %s", self._manifest_path, exc)
+            return {}
+
+    def _save_manifest(self, manifest: dict) -> None:
+        self._manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._manifest_path.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as file:
+            json.dump(manifest, file, indent=2, sort_keys=True)
+        tmp_path.replace(self._manifest_path)
+
+    def _manifest_entry_from_object(self, item: dict) -> dict:
+        last_modified = item.get("LastModified")
+        if hasattr(last_modified, "isoformat"):
+            last_modified = last_modified.isoformat()
+        return {
+            "etag": self._normalize_etag(item.get("ETag")),
+            "size": item.get("Size"),
+            "last_modified": last_modified,
+        }
+
+    def _local_matches_remote(self, destination: Path, local_entry: dict | None, remote_entry: dict) -> bool:
+        if not destination.is_file() or not isinstance(local_entry, dict):
+            return False
+        try:
+            if destination.stat().st_size != remote_entry.get("size"):
+                return False
+        except OSError:
+            return False
+        return (
+            local_entry.get("etag") == remote_entry.get("etag")
+            and local_entry.get("size") == remote_entry.get("size")
+            and local_entry.get("sha256") == self._sha256_file(destination)
+        )
+
+    def _record_uploaded_file(self, key: str, full_path: Path) -> None:
+        try:
+            response = self.client.head_object(Bucket=self.bucket, Key=key)
+            entry = self._manifest_entry_from_object({
+                "ETag": response.get("ETag"),
+                "Size": response.get("ContentLength", full_path.stat().st_size),
+                "LastModified": response.get("LastModified"),
+            })
+        except Exception:
+            entry = {
+                "etag": None,
+                "size": full_path.stat().st_size,
+                "last_modified": None,
+            }
+        entry["sha256"] = self._sha256_file(full_path)
+        manifest = self._load_manifest()
+        manifest[key] = entry
+        self._save_manifest(manifest)
+
+    def _remove_manifest_entry(self, key: str) -> None:
+        manifest = self._load_manifest()
+        if key in manifest:
+            del manifest[key]
+            self._save_manifest(manifest)
+
+    @staticmethod
+    def _normalize_etag(etag: str | None) -> str | None:
+        return etag.strip('"') if isinstance(etag, str) else etag
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()

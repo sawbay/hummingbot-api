@@ -117,11 +117,24 @@ async def lifespan(app: FastAPI):
     fs_util.set_storage_service(r2_storage_service)
 
     if settings.r2.enabled and settings.r2.sync_on_startup:
+        logging.info(
+            "R2 startup sync enabled; pulling durable prefixes from bucket=%s prefix=%s bots_root=%s",
+            settings.r2.bucket,
+            settings.r2.prefix,
+            fs_util.base_path,
+        )
+        started_at = time.time()
         result = r2_storage_service.pull_durable_prefixes()
         if not result.success:
+            logging.error("R2 startup pull failed after %.2fs: %s", time.time() - started_at, result.errors)
             raise RuntimeError(f"R2 startup pull failed: {result.errors}")
-        logging.info("R2 startup pull completed: %s", result.to_dict())
+        logging.info("R2 startup pull completed in %.2fs: %s", time.time() - started_at, result.to_dict())
     else:
+        logging.info(
+            "R2 startup sync skipped; enabled=%s sync_on_startup=%s",
+            settings.r2.enabled,
+            settings.r2.sync_on_startup,
+        )
         r2_storage_service.ensure_local_directories()
 
     # Ensure password verification file exists

@@ -101,6 +101,7 @@ impl MqttBus {
         data: Value,
     ) -> anyhow::Result<()> {
         let topic = format!("hbot/{}/{}", bot_name.replace('.', "/"), command);
+        tracing::info!(topic = %topic, payload = %data, "publishing MQTT command");
         let message = json!({
             "header": {
                 "timestamp": millis(),
@@ -143,6 +144,12 @@ impl MqttBus {
         self.pending.lock().await.insert(reply_to.clone(), tx);
 
         let topic = format!("hbot/{}/{}", bot_name.replace('.', "/"), command);
+        tracing::info!(
+            topic = %topic,
+            reply_to = %reply_to,
+            payload = %data,
+            "publishing MQTT command and waiting for response"
+        );
         let message = json!({
             "header": {
                 "timestamp": millis(),
@@ -253,6 +260,7 @@ async fn handle_publish(
     let value = parse_payload(&payload);
 
     if topic == "hbot/orchestrate" {
+        tracing::info!("received hbot/orchestrate message: {}", value);
         let _ = orchestrate_tx.send(value);
         return;
     }

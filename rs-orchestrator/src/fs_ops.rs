@@ -329,9 +329,14 @@ mod tests {
             .await
             .unwrap();
 
-        cleanup_assignment(root, "warmbot_1", "run.yml", &["controller.yml".to_string()])
-            .await
-            .unwrap();
+        cleanup_assignment(
+            root,
+            "warmbot_1",
+            "run.yml",
+            &["controller.yml".to_string()],
+        )
+        .await
+        .unwrap();
 
         assert!(fs::metadata(conf.join("conf_client.yml")).await.is_ok());
         assert!(fs::metadata(conf.join("scripts/run.yml")).await.is_err());
