@@ -172,7 +172,7 @@ For `deploy-v2-controllers`, the API:
 5. Writes files locally, triggering R2 write-through when R2 is enabled.
 6. Registers the deployment in the in-memory pending registry.
 7. Creates a `BotRun` database record with `run_status=CREATED`.
-8. Publishes an orchestration request to `hbot/orchestrate`.
+8. Publishes an orchestration request to `orchestrate/deploy`.
 9. Returns immediately with `orchestration_status: queued`.
 
 Generated script config shape:
@@ -192,7 +192,7 @@ For `deploy-v2-script`, the API:
 3. Reads the script config if one is supplied, including referenced controllers.
 4. Registers the deployment in the pending registry.
 5. Creates a `BotRun` database record with `run_status=CREATED`.
-6. Publishes an orchestration request to `hbot/orchestrate`.
+6. Publishes an orchestration request to `orchestrate/deploy`.
 7. Returns immediately with `orchestration_status: queued`.
 
 ---
@@ -202,7 +202,7 @@ For `deploy-v2-script`, the API:
 The API publishes JSON to:
 
 ```
-hbot/orchestrate
+orchestrate/deploy
 ```
 
 Example payload:
@@ -238,7 +238,7 @@ Example payload:
 `rs-orchestrator` publishes progress to:
 
 ```text
-hbot/orchestrate/status
+orchestrate/status
 ```
 
 Example status:
@@ -269,21 +269,20 @@ On `running`, the API updates the latest `BotRun` from the temporary logical `in
 
 ## 6. Rust Warm-Pool Runtime Steps
 
-For every valid message on `hbot/orchestrate`, `rs-orchestrator`:
+For every valid message on `orchestrate/deploy`, `rs-orchestrator`:
 
 1. Parses and validates the payload.
 2. Reserves one in-memory idle slot, for example `warmbot_1`.
-3. Publishes `reserved` to `hbot/orchestrate/status`.
+3. Publishes `reserved` to `orchestrate/status`.
 4. Downloads requested R2 keys into local `bots/` when R2 is enabled.
 5. Copies the selected credential profile into `bots/pools/<warmbot_id>/conf`.
 6. Rewrites `conf_client.yml` so `instance_id` matches the warm bot id.
 7. Copies the script config into `bots/pools/<warmbot_id>/conf/scripts/`.
 8. Copies referenced controllers into `bots/pools/<warmbot_id>/conf/controllers/`.
 9. Publishes `configuring`.
-10. Sends `import` to `hbot/<warmbot_id>/import`.
-11. Sends `start` to `hbot/<warmbot_id>/start`.
-12. Waits for `strategy/running`.
-13. Marks the slot `running` and publishes `running`.
+10. Sends `start` to `hbot/<warmbot_id>/start` with `v2_conf`.
+11. Waits for `strategy/running`.
+12. Marks the slot `running` and publishes `running`.
 
 On failure, `rs-orchestrator` marks the slot `error` and publishes:
 
@@ -411,21 +410,21 @@ State meanings:
 | `offline` | No recent MQTT heartbeat from the bot. |
 | `bootstrapping` | Bot process is starting and connecting to MQTT. |
 | `idle` | Bot is connected and available for assignment. |
-| `reserved` | API selected this bot for a deployment but has not started config import yet. |
-| `configuring` | API is copying/sending strategy config and importing it into the bot. |
+| `reserved` | `rs-orchestrator` selected this bot for a deployment but has not started config materialization yet. |
+| `configuring` | `rs-orchestrator` is copying credentials, script config, and controller config into the bot. |
 | `running` | Strategy or controllers are active. |
 | `stopping` | API has sent stop command and is waiting for confirmation. |
 | `cleanup` | API is clearing assigned script/controller config and transient state. |
-| `error` | Bot failed startup, config import, strategy start, or stop/cleanup. |
+| `error` | Bot failed startup, config materialization, strategy start, or stop/cleanup. |
 
-The current implementation keeps this state in memory and rebuilds it from MQTT heartbeats/status, Docker state, filesystem state, and `bot_runs`. No `bot_slots` table is used.
+The current implementation keeps this state in memory and rebuilds it from MQTT heartbeats/status plus runtime filesystem/container observations. `rs-orchestrator` does not connect to Postgres or write `bot_runs`; the Python API owns durable deployment records. No `bot_slots` table is used.
 
 In-memory shape:
 
 ```text
 - bot_name
 - status
-- assigned_run_id
+- assigned_instance_name
 - account_name
 - last_heartbeat
 - current_config_name
@@ -459,7 +458,7 @@ When a user requests a strategy deployment, the API should not create a new cont
 1. The API validates the deployment request.
 2. The API writes durable config locally and to R2.
 3. The API creates a queued `BotRun`.
-4. The API publishes to `hbot/orchestrate`.
+4. The API publishes to `orchestrate/deploy`.
 5. `rs-orchestrator` finds an `idle` slot.
 6. `rs-orchestrator` atomically reserves the slot:
 
@@ -469,10 +468,9 @@ idle -> reserved
 
 7. `rs-orchestrator` hydrates the requested R2 files.
 8. `rs-orchestrator` materializes credentials/script/controller config into the selected bot.
-9. `rs-orchestrator` imports the script/controller config over MQTT.
-10. `rs-orchestrator` starts the strategy over MQTT.
-11. `rs-orchestrator` waits for `status_updates` confirming the strategy is running.
-12. `rs-orchestrator` marks the slot:
+9. `rs-orchestrator` starts the strategy over MQTT using `v2_conf`.
+10. `rs-orchestrator` waits for `status_updates` confirming the strategy is running.
+11. `rs-orchestrator` marks the slot:
 
 ```text
 configuring -> running
@@ -577,25 +575,7 @@ The deployed controller config visible to the bot at runtime is:
 /home/hummingbot/conf/controllers/usdc-usdt-recurring-buy.yml
 ```
 
-After the files are copied, `rs-orchestrator` sends an MQTT command to import or load the script config.
-
-The exact command topic should follow the existing Hummingbot command convention:
-
-```text
-hbot/<bot_id>/import
-```
-
-Example:
-
-```json
-{
-  "request_id": "deploy-warmbot_1-run-001-import",
-  "script": "v2_with_controllers.py",
-  "conf": "warmbot_1-run-001.yml"
-}
-```
-
-Then `rs-orchestrator` starts the strategy:
+After the files are copied, `rs-orchestrator` starts the strategy:
 
 ```text
 hbot/<bot_id>/start
@@ -607,8 +587,7 @@ Example:
 {
   "request_id": "deploy-warmbot_1-run-001-start",
   "log_level": "INFO",
-  "script": "v2_with_controllers.py",
-  "conf": "warmbot_1-run-001.yml",
+  "v2_conf": "warmbot_1-run-001.yml",
   "is_quickstart": true,
   "async_backend": true
 }
@@ -665,7 +644,7 @@ bots/conf/scripts/warmbot_1-run-001.yml
 bots/conf/controllers/
 ```
 
-4. The API publishes the deployment request to `hbot/orchestrate`.
+4. The API publishes the deployment request to `orchestrate/deploy`.
 5. `rs-orchestrator` selects an idle bot, for example `warmbot_1`.
 6. `rs-orchestrator` downloads the requested files from R2.
 7. `rs-orchestrator` copies the script config into the selected bot:
@@ -680,12 +659,10 @@ bots/pools/warmbot_1/conf/scripts/warmbot_1-run-001.yml
 bots/pools/warmbot_1/conf/controllers/usdc-usdt-recurring-buy.yml
 ```
 
-9. `rs-orchestrator` sends `import` over MQTT.
-10. `rs-orchestrator` waits for an import acknowledgement or failure status.
-11. `rs-orchestrator` sends `start` over MQTT.
-12. `rs-orchestrator` waits for `strategy/running` status.
-13. `rs-orchestrator` marks the slot `running` and publishes status.
-14. The API receives `hbot/orchestrate/status` and updates the `BotRun`.
+9. `rs-orchestrator` sends `start` over MQTT with `v2_conf`.
+10. `rs-orchestrator` waits for `strategy/running` status.
+11. `rs-orchestrator` marks the slot `running` and publishes status.
+12. The API receives `orchestrate/status` and updates the `BotRun`.
 
 This keeps the API's source-of-truth configs separate from the bot's runtime copy.
 
@@ -740,9 +717,6 @@ A deployment should use request/response IDs so the API can distinguish "command
 Example high-level sequence:
 
 ```text
-API -> hbot/warmbot_1/import
-warmbot_1 -> hummingbot-api/response/<request_id>
-
 API -> hbot/warmbot_1/start
 warmbot_1 -> hbot/warmbot_1/status_updates
 warmbot_1 -> hummingbot-api/response/<request_id>
@@ -762,7 +736,7 @@ Failure updates should include enough context for the UI:
   "type": "strategy",
   "msg": "failed",
   "data": {
-    "stage": "import",
+    "stage": "start",
     "error": "controller config not found"
   }
 }
@@ -867,5 +841,5 @@ The intended future pool flow is:
 2. Each bot connects to MQTT and publishes lifecycle status.
 3. `rs-orchestrator` discovers connected idle bots.
 4. The API queues a deployment request instead of creating a new container.
-5. `rs-orchestrator` selects an idle bot and sends config/import/start commands over MQTT.
+5. `rs-orchestrator` selects an idle bot, materializes config files, and sends a start command with `v2_conf` over MQTT.
 6. When stopped, the bot is cleaned and returned to the idle pool.

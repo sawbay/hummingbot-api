@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::AppResult;
@@ -24,7 +23,6 @@ pub fn router(orchestrator: Arc<Orchestrator>) -> Router {
             "/bot-orchestration/deployment-status/:instance_name",
             get(deployment_status),
         )
-        .route("/bot-orchestration/bot-runs", get(bot_runs))
         .with_state(orchestrator)
 }
 
@@ -78,26 +76,4 @@ async fn deployment_status(
         status: "success",
         data: orchestrator.deployment_status(&instance_name).await?,
     }))
-}
-
-#[derive(Deserialize)]
-struct RunsQuery {
-    limit: Option<i64>,
-    offset: Option<i64>,
-}
-
-async fn bot_runs(
-    State(orchestrator): State<Arc<Orchestrator>>,
-    Query(query): Query<RunsQuery>,
-) -> AppResult<Json<Value>> {
-    let limit = query.limit.unwrap_or(100);
-    let offset = query.offset.unwrap_or(0);
-    let rows = orchestrator.list_bot_runs(limit, offset).await?;
-    Ok(Json(json!({
-        "status": "success",
-        "data": rows,
-        "total": rows.len(),
-        "limit": limit,
-        "offset": offset,
-    })))
 }

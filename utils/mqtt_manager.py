@@ -62,7 +62,7 @@ class MQTTManager:
             "hbot/+/hb",
             "hbot/+/performance",
             "hbot/+/external/event/+",
-            "hbot/orchestrate/status",
+            "orchestrate/status",
             "hummingbot-api/response/+",
         }
 

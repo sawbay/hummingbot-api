@@ -4,8 +4,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use tokio::sync::Mutex;
 
-use crate::db::Db;
-use crate::types::{BotRunRow, SlotState, SlotStatus};
+use crate::types::{SlotState, SlotStatus};
 
 #[derive(Clone)]
 pub struct SlotStore {
@@ -82,7 +81,7 @@ impl SlotStore {
             .or_insert_with(|| SlotState::new(bot_name.to_string()));
         slot.last_heartbeat = Some(Utc::now());
         if matches!(slot.status, SlotStatus::Offline | SlotStatus::Bootstrapping) {
-            slot.status = if slot.assigned_run_id.is_some() {
+            slot.status = if slot.assigned_instance_name.is_some() {
                 SlotStatus::Running
             } else {
                 SlotStatus::Idle
@@ -111,17 +110,17 @@ impl SlotStore {
     pub async fn assign_running(
         &self,
         bot_name: &str,
-        run_id: i32,
+        instance_name: Option<String>,
         account_name: String,
-        config_name: String,
+        config_name: Option<String>,
         controllers: Vec<String>,
     ) {
         let mut guard = self.inner.lock().await;
         if let Some(slot) = guard.get_mut(bot_name) {
             slot.status = SlotStatus::Running;
-            slot.assigned_run_id = Some(run_id);
+            slot.assigned_instance_name = instance_name;
             slot.account_name = Some(account_name);
-            slot.current_config_name = Some(config_name);
+            slot.current_config_name = config_name;
             slot.current_controller_ids = controllers;
             slot.last_error = None;
             slot.updated_at = Utc::now();
@@ -131,26 +130,7 @@ impl SlotStore {
     pub async fn assign_configuring(
         &self,
         bot_name: &str,
-        run_id: i32,
-        account_name: String,
-        config_name: String,
-        controllers: Vec<String>,
-    ) {
-        let mut guard = self.inner.lock().await;
-        if let Some(slot) = guard.get_mut(bot_name) {
-            slot.status = SlotStatus::Configuring;
-            slot.assigned_run_id = Some(run_id);
-            slot.account_name = Some(account_name);
-            slot.current_config_name = Some(config_name);
-            slot.current_controller_ids = controllers;
-            slot.last_error = None;
-            slot.updated_at = Utc::now();
-        }
-    }
-
-    pub async fn assign_configuring_without_run(
-        &self,
-        bot_name: &str,
+        instance_name: Option<String>,
         account_name: String,
         config_name: Option<String>,
         controllers: Vec<String>,
@@ -158,26 +138,7 @@ impl SlotStore {
         let mut guard = self.inner.lock().await;
         if let Some(slot) = guard.get_mut(bot_name) {
             slot.status = SlotStatus::Configuring;
-            slot.assigned_run_id = None;
-            slot.account_name = Some(account_name);
-            slot.current_config_name = config_name;
-            slot.current_controller_ids = controllers;
-            slot.last_error = None;
-            slot.updated_at = Utc::now();
-        }
-    }
-
-    pub async fn assign_running_without_run(
-        &self,
-        bot_name: &str,
-        account_name: String,
-        config_name: Option<String>,
-        controllers: Vec<String>,
-    ) {
-        let mut guard = self.inner.lock().await;
-        if let Some(slot) = guard.get_mut(bot_name) {
-            slot.status = SlotStatus::Running;
-            slot.assigned_run_id = None;
+            slot.assigned_instance_name = instance_name;
             slot.account_name = Some(account_name);
             slot.current_config_name = config_name;
             slot.current_controller_ids = controllers;
@@ -190,7 +151,7 @@ impl SlotStore {
         let mut guard = self.inner.lock().await;
         if let Some(slot) = guard.get_mut(bot_name) {
             slot.status = SlotStatus::Idle;
-            slot.assigned_run_id = None;
+            slot.assigned_instance_name = None;
             slot.account_name = None;
             slot.current_config_name = None;
             slot.current_controller_ids.clear();
@@ -220,23 +181,11 @@ impl SlotStore {
         }
     }
 
-    pub async fn rebuild_from_db(&self, db: &Db) {
-        match db.active_runs_for_slots().await {
-            Ok(rows) => self.apply_active_runs(rows).await,
-            Err(err) => tracing::warn!("failed to rebuild slots from bot_runs: {err}"),
-        }
-    }
-
-    async fn apply_active_runs(&self, rows: Vec<BotRunRow>) {
-        let mut guard = self.inner.lock().await;
-        for row in rows {
-            if let Some(slot) = guard.get_mut(&row.bot_name) {
-                slot.status = SlotStatus::Running;
-                slot.assigned_run_id = Some(row.id);
-                slot.account_name = Some(row.account_name);
-                slot.current_config_name = row.config_name;
-                slot.updated_at = Utc::now();
-            }
-        }
+    pub async fn find_by_instance(&self, instance_name: &str) -> Option<SlotState> {
+        let guard = self.inner.lock().await;
+        guard
+            .values()
+            .find(|slot| slot.assigned_instance_name.as_deref() == Some(instance_name))
+            .cloned()
     }
 }

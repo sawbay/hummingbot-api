@@ -26,24 +26,6 @@ services:
       - postgres
       - emqx
 
-  rs-orchestrator:
-    container_name: rs-orchestrator
-    image: ghcr.io/sawbay/rs-orchestrator:latest
-    build:
-      context: ./rs-orchestrator
-    ports:
-      - "8001:8001"
-    volumes:
-      - ./bots:/app/bots
-      - /var/run/docker.sock:/var/run/docker.sock
-    env_file:
-      - ./rs-orchestrator/.env
-    networks:
-      - emqx-bridge
-    depends_on:
-      - postgres
-      - emqx
-
   emqx:
     container_name: hummingbot-emqx
     image: emqx:5

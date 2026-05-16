@@ -1,5 +1,4 @@
 mod config;
-mod db;
 mod docker;
 mod error;
 mod fs_ops;
@@ -20,7 +19,6 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Settings;
-use crate::db::Db;
 use crate::docker::DockerClient;
 use crate::mqtt::MqttBus;
 use crate::orchestrator::Orchestrator;
@@ -37,12 +35,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let settings = Settings::load().context("load settings")?;
-    let db = Db::connect(&settings.database_url)
-        .await
-        .context("connect database")?
-        .with_slot_names(settings.pool_bots.clone());
     let slots = SlotStore::new(settings.pool_bots.clone());
-    slots.rebuild_from_db(&db).await;
 
     let docker = DockerClient::new();
     let r2 = R2Client::from_settings(&settings)
@@ -54,14 +47,7 @@ async fn main() -> anyhow::Result<()> {
             .context("connect mqtt")?,
     );
 
-    let orchestrator = Arc::new(Orchestrator::new(
-        settings.clone(),
-        db,
-        slots,
-        mqtt,
-        docker,
-        r2,
-    ));
+    let orchestrator = Arc::new(Orchestrator::new(settings.clone(), slots, mqtt, docker, r2));
 
     let app: Router = routes::router(orchestrator).layer(TraceLayer::new_for_http());
     let addr = SocketAddr::from(([0, 0, 0, 0], settings.port));

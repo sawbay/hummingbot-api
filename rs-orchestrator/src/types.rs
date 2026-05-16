@@ -20,7 +20,7 @@ pub enum SlotStatus {
 pub struct SlotState {
     pub bot_name: String,
     pub status: SlotStatus,
-    pub assigned_run_id: Option<i32>,
+    pub assigned_instance_name: Option<String>,
     pub account_name: Option<String>,
     pub last_heartbeat: Option<DateTime<Utc>>,
     pub current_config_name: Option<String>,
@@ -34,7 +34,7 @@ impl SlotState {
         Self {
             bot_name,
             status: SlotStatus::Offline,
-            assigned_run_id: None,
+            assigned_instance_name: None,
             account_name: None,
             last_heartbeat: None,
             current_config_name: None,
@@ -134,25 +134,6 @@ pub struct DeployResponse {
 pub struct ApiResponse<T: Serialize> {
     pub status: &'static str,
     pub data: T,
-}
-
-#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
-pub struct BotRunRow {
-    pub id: i32,
-    pub bot_name: String,
-    pub instance_name: String,
-    pub deployed_at: Option<DateTime<Utc>>,
-    pub stopped_at: Option<DateTime<Utc>>,
-    pub strategy_type: String,
-    pub strategy_name: String,
-    pub config_name: Option<String>,
-    pub account_name: String,
-    pub image_version: Option<String>,
-    pub deployment_status: String,
-    pub run_status: String,
-    pub deployment_config: Option<String>,
-    pub final_status: Option<String>,
-    pub error_message: Option<String>,
 }
 
 #[derive(Clone, Debug)]

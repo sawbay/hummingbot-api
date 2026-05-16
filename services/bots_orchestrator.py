@@ -9,6 +9,9 @@ from utils.mqtt_manager import MQTTManager
 
 logger = logging.getLogger(__name__)
 
+ORCHESTRATE_DEPLOY_TOPIC = "orchestrate/deploy"
+ORCHESTRATE_STATUS_TOPIC = "orchestrate/status"
+
 
 # HummingbotPerformanceListener class is no longer needed
 # All functionality is now handled by MQTTManager
@@ -101,11 +104,11 @@ class BotsOrchestrator:
                 except Exception as db_err:
                     logger.error(f"Failed to mark orchestration failed for {instance_name}: {db_err}", exc_info=True)
 
-        self.mqtt_manager.add_handler("hbot/orchestrate/status", handle_status)
+        self.mqtt_manager.add_handler(ORCHESTRATE_STATUS_TOPIC, handle_status)
 
     async def publish_orchestration_request(self, payload: dict) -> bool:
         """Publish a queued deployment request to the Rust orchestrator."""
-        return await self.mqtt_manager.publish_raw("hbot/orchestrate", payload)
+        return await self.mqtt_manager.publish_raw(ORCHESTRATE_DEPLOY_TOPIC, payload)
 
     @staticmethod
     def hummingbot_containers_fiter(container):

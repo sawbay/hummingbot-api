@@ -1,0 +1,82 @@
+services:
+  rs-orchestrator:
+    container_name: rs-orchestrator
+    image: ghcr.io/sawbay/rs-orchestrator:latest
+    build:
+      context: ./rs-orchestrator
+    env_file:
+      - ./rs-orchestrator/.env
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./rs-orchestrator/bots:/app/bots
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  warmbot-01:
+    image: ${HUMMINGBOT_IMAGE:-ghcr.io/sawbay/hummingbot:custom}
+    container_name: warmbot_1
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - BROKER_HOST=host.docker.internal
+    volumes:
+      - ./rs-orchestrator/bots/pools/warmbot_1/conf:/home/hummingbot/conf:rw
+      - ./rs-orchestrator/bots/pools/warmbot_1/data:/home/hummingbot/data:rw
+      - ./rs-orchestrator/bots/pools/warmbot_1/logs:/home/hummingbot/logs:rw
+      - ./rs-orchestrator/bots/scripts:/home/hummingbot/scripts:rw
+      - ./rs-orchestrator/bots/controllers:/home/hummingbot/controllers:rw
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    tty: true
+    stdin_open: true
+
+  warmbot-02:
+    image: ${HUMMINGBOT_IMAGE:-ghcr.io/sawbay/hummingbot:custom}
+    container_name: warmbot_2
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - BROKER_HOST=host.docker.internal
+    volumes:
+      - ./rs-orchestrator/bots/pools/warmbot_2/conf:/home/hummingbot/conf:rw
+      - ./rs-orchestrator/bots/pools/warmbot_2/data:/home/hummingbot/data:rw
+      - ./rs-orchestrator/bots/pools/warmbot_2/logs:/home/hummingbot/logs:rw
+      - ./rs-orchestrator/bots/scripts:/home/hummingbot/scripts:rw
+      - ./rs-orchestrator/bots/controllers:/home/hummingbot/controllers:rw
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    tty: true
+    stdin_open: true
+
+  # warmbot-03:
+  #   image: ${HUMMINGBOT_IMAGE:-ghcr.io/sawbay/hummingbot:custom}
+  #   container_name: warmbot_3
+  #   restart: unless-stopped
+  #   network_mode: host
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     - BROKER_HOST=host.docker.internal
+  #   volumes:
+  #     - ./rs-orchestrator/bots/pools/warmbot_3/conf:/home/hummingbot/conf:rw
+  #     - ./rs-orchestrator/bots/pools/warmbot_3/data:/home/hummingbot/data:rw
+  #     - ./rs-orchestrator/bots/pools/warmbot_3/logs:/home/hummingbot/logs:rw
+  #     - ./rs-orchestrator/bots/scripts:/home/hummingbot/scripts:rw
+  #     - ./rs-orchestrator/bots/controllers:/home/hummingbot/controllers:rw
+  #   logging:
+  #     driver: json-file
+  #     options:
+  #       max-size: 10m
+  #       max-file: "5"
+  #   tty: true
+  #   stdin_open: true

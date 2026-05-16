@@ -12,6 +12,8 @@ use crate::config::Settings;
 use crate::slot_store::SlotStore;
 use crate::types::{SlotStatus, StatusEvent};
 
+pub const ORCHESTRATE_DEPLOY_TOPIC: &str = "orchestrate/deploy";
+
 #[derive(Clone)]
 pub struct MqttBus {
     client: AsyncClient,
@@ -62,7 +64,7 @@ impl MqttBus {
             "hbot/+/notify",
             "hbot/+/performance",
             "hummingbot-api/response/+",
-            "hbot/orchestrate",
+            ORCHESTRATE_DEPLOY_TOPIC,
         ] {
             self.client.subscribe(topic, QoS::AtLeastOnce).await?;
         }
@@ -101,11 +103,18 @@ impl MqttBus {
         data: Value,
     ) -> anyhow::Result<()> {
         let topic = format!("hbot/{}/{}", bot_name.replace('.', "/"), command);
-        tracing::info!(topic = %topic, payload = %data, "publishing MQTT command");
+        let request_id = format!("{}-{}", command, millis());
+        let reply_to = format!("hummingbot-api/response/{request_id}");
+        tracing::info!(
+            topic = %topic,
+            reply_to = %reply_to,
+            payload = %data,
+            "publishing MQTT command"
+        );
         let message = json!({
             "header": {
                 "timestamp": millis(),
-                "reply_to": format!("hummingbot-api-response-{}", millis()),
+                "reply_to": reply_to,
                 "msg_id": millis(),
                 "node_id": "rs-orchestrator",
                 "agent": "rs-orchestrator",
@@ -131,6 +140,7 @@ impl MqttBus {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn publish_command_and_wait(
         &self,
         bot_name: &str,
@@ -259,8 +269,8 @@ async fn handle_publish(
 ) {
     let value = parse_payload(&payload);
 
-    if topic == "hbot/orchestrate" {
-        tracing::info!("received hbot/orchestrate message: {}", value);
+    if topic == ORCHESTRATE_DEPLOY_TOPIC {
+        tracing::info!(topic = %topic, payload = %value, "received orchestration request");
         let _ = orchestrate_tx.send(value);
         return;
     }
@@ -268,6 +278,8 @@ async fn handle_publish(
     if topic.starts_with("hummingbot-api/response/") {
         if let Some(tx) = pending.lock().await.remove(&topic) {
             let _ = tx.send(value);
+        } else {
+            tracing::info!(topic = %topic, payload = %value, "received MQTT command response");
         }
         return;
     }

@@ -937,7 +937,7 @@ async def deploy_v2_controllers(
         )
         published = await bots_manager.publish_orchestration_request(orchestration_payload)
         if not published:
-            error_msg = "Failed to publish orchestration request to hbot/orchestrate"
+            error_msg = "Failed to publish orchestration request to orchestrate/deploy"
             bots_manager.mark_pending_bot_failed(unique_instance_name, error_msg)
             try:
                 async with db_manager.get_session_context() as session:
@@ -1045,7 +1045,7 @@ async def deploy_v2_script(
         )
         published = await bots_manager.publish_orchestration_request(orchestration_payload)
         if not published:
-            error_msg = "Failed to publish orchestration request to hbot/orchestrate"
+            error_msg = "Failed to publish orchestration request to orchestrate/deploy"
             bots_manager.mark_pending_bot_failed(unique_instance_name, error_msg)
             try:
                 async with db_manager.get_session_context() as session:

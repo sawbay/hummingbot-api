@@ -6,7 +6,6 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 pub struct Settings {
     pub port: u16,
-    pub database_url: String,
     pub broker_host: String,
     pub broker_port: u16,
     pub broker_username: Option<String>,
@@ -26,14 +25,8 @@ pub struct Settings {
 
 impl Settings {
     pub fn load() -> anyhow::Result<Self> {
-        let raw_database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://hbot:hummingbot-api@localhost:5432/hummingbot_api".to_string()
-        });
-        let database_url = raw_database_url.replace("postgresql+asyncpg://", "postgresql://");
-
         Ok(Self {
             port: env_parse("RS_ORCHESTRATOR_PORT", 8001),
-            database_url,
             broker_host: std::env::var("BROKER_HOST").unwrap_or_else(|_| "localhost".to_string()),
             broker_port: env_parse("BROKER_PORT", 1883),
             broker_username: empty_to_none(std::env::var("BROKER_USERNAME").ok()),
