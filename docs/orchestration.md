@@ -32,13 +32,13 @@ bots/
       logs/
 
   pools/
-    bot_1/
+    warmbot_1/
       conf/
       data/
       logs/
 ```
 
-`bots/credentials/<profile>` is the source credential profile. `bots/instances/<instance_name>` is the per-deployment runtime copy created by the API. `bots/pools/bot_1`, `bot_2`, and `bot_3` are warm bot pool directories used by `docker-compose.bot-pool.yml`.
+`bots/credentials/<profile>` is the source credential profile. `bots/instances/<instance_name>` is the per-deployment runtime copy created by the API. `bots/pools/warmbot_1`, `warmbot_2`, and `warmbot_3` are warm bot pool directories used by `docker-compose.bot-pool.yml`.
 
 ---
 
@@ -75,9 +75,9 @@ hbot/<instance_id>/stop
 For the warm pool, each pool bot should have a stable `instance_id`:
 
 ```yaml
-instance_id: bot_1
-instance_id: bot_2
-instance_id: bot_3
+instance_id: warmbot_1
+instance_id: warmbot_2
+instance_id: warmbot_3
 ```
 
 The current local pool config uses local MQTT:
@@ -141,9 +141,9 @@ CONFIG_PASSWORD=<value from .env>
 For pool bots, credentials are already materialized inside:
 
 ```text
-bots/pools/bot_1/conf/
-bots/pools/bot_2/conf/
-bots/pools/bot_3/conf/
+bots/pools/warmbot_1/conf/
+bots/pools/warmbot_2/conf/
+bots/pools/warmbot_3/conf/
 ```
 
 Each pool bot should keep its own `conf_client.yml` and connector credential files. Sharing a full `conf` directory across bots is unsafe because it causes `instance_id`, logs, SQLite DBs, and mutable config state to collide.
@@ -288,9 +288,9 @@ docker-compose.bot-pool.yml
 Each pool bot has a stable identity and runtime directory:
 
 ```text
-bots/pools/bot_1/
-bots/pools/bot_2/
-bots/pools/bot_3/
+bots/pools/warmbot_1/
+bots/pools/warmbot_2/
+bots/pools/warmbot_3/
 ```
 
 Each service mounts:
@@ -304,8 +304,8 @@ bots/pools/<bot_id>/logs -> /home/hummingbot/logs
 Each bot's Docker container name should match its Hummingbot `instance_id`:
 
 ```text
-container_name: bot_1
-conf_client.yml: instance_id: bot_1
+container_name: warmbot_1
+conf_client.yml: instance_id: warmbot_1
 ```
 
 That keeps Docker discovery, MQTT topics, and API state aligned.
@@ -414,7 +414,7 @@ bot_slots
 
 ### Startup Flow
 
-1. Docker Compose starts `bot_1`, `bot_2`, and `bot_3`.
+1. Docker Compose starts `warmbot_1`, `warmbot_2`, and `warmbot_3`.
 2. Each bot unlocks encrypted config using `CONFIG_PASSWORD`.
 3. Each bot loads `conf_client.yml`.
 4. Headless mode forces or requires MQTT autostart.
@@ -530,20 +530,20 @@ bots/pools/<bot_id>/conf/scripts/<run_config>.yml
 bots/pools/<bot_id>/conf/controllers/<controller>.yml
 ```
 
-Concrete example for `bot_1`:
+Concrete example for `warmbot_1`:
 
 ```text
-bots/conf/scripts/bot_1-run-001.yml
-  -> bots/pools/bot_1/conf/scripts/bot_1-run-001.yml
+bots/conf/scripts/warmbot_1-run-001.yml
+  -> bots/pools/warmbot_1/conf/scripts/warmbot_1-run-001.yml
 
 bots/conf/controllers/usdc-usdt-recurring-buy.yml
-  -> bots/pools/bot_1/conf/controllers/usdc-usdt-recurring-buy.yml
+  -> bots/pools/warmbot_1/conf/controllers/usdc-usdt-recurring-buy.yml
 ```
 
 The deployed script config visible to the bot at runtime is:
 
 ```text
-/home/hummingbot/conf/scripts/bot_1-run-001.yml
+/home/hummingbot/conf/scripts/warmbot_1-run-001.yml
 ```
 
 The deployed controller config visible to the bot at runtime is:
@@ -564,9 +564,9 @@ Example:
 
 ```json
 {
-  "request_id": "deploy-bot_1-run-001-import",
+  "request_id": "deploy-warmbot_1-run-001-import",
   "script": "v2_with_controllers.py",
-  "conf": "bot_1-run-001.yml"
+  "conf": "warmbot_1-run-001.yml"
 }
 ```
 
@@ -580,10 +580,10 @@ Example:
 
 ```json
 {
-  "request_id": "deploy-bot_1-run-001-start",
+  "request_id": "deploy-warmbot_1-run-001-start",
   "log_level": "INFO",
   "script": "v2_with_controllers.py",
-  "conf": "bot_1-run-001.yml",
+  "conf": "warmbot_1-run-001.yml",
   "is_quickstart": true,
   "async_backend": true
 }
@@ -592,9 +592,9 @@ Example:
 The bot should respond on an API response topic or publish status transitions on:
 
 ```text
-hbot/bot_1/status_updates
-hbot/bot_1/log
-hbot/bot_1/notify
+hbot/warmbot_1/status_updates
+hbot/warmbot_1/log
+hbot/warmbot_1/notify
 ```
 
 Expected status sequence:
@@ -612,7 +612,7 @@ If the bot fails to load the copied YAML, it should publish:
   "msg": "failed",
   "data": {
     "stage": "load_config",
-    "script_config": "bot_1-run-001.yml",
+    "script_config": "warmbot_1-run-001.yml",
     "error": "controller config usdc-usdt-recurring-buy.yml not found"
   }
 }
@@ -622,17 +622,17 @@ If the bot fails to load the copied YAML, it should publish:
 
 For a warm bot assignment, the API should perform these steps:
 
-1. Select an idle bot, for example `bot_1`.
+1. Select an idle bot, for example `warmbot_1`.
 2. Create a run-specific script config name, for example:
 
 ```text
-bot_1-run-001.yml
+warmbot_1-run-001.yml
 ```
 
 3. Write the script config into the API source directory:
 
 ```text
-bots/conf/scripts/bot_1-run-001.yml
+bots/conf/scripts/warmbot_1-run-001.yml
 ```
 
 4. Ensure every referenced controller exists under:
@@ -644,13 +644,13 @@ bots/conf/controllers/
 5. Copy the script config into the selected bot:
 
 ```text
-bots/pools/bot_1/conf/scripts/bot_1-run-001.yml
+bots/pools/warmbot_1/conf/scripts/warmbot_1-run-001.yml
 ```
 
 6. Copy each referenced controller into the selected bot:
 
 ```text
-bots/pools/bot_1/conf/controllers/usdc-usdt-recurring-buy.yml
+bots/pools/warmbot_1/conf/controllers/usdc-usdt-recurring-buy.yml
 ```
 
 7. Send `import_strategy` over MQTT.
@@ -694,10 +694,10 @@ and returns an acknowledgement:
 
 ```json
 {
-  "request_id": "deploy-bot_1-run-001-configure",
+  "request_id": "deploy-warmbot_1-run-001-configure",
   "success": true,
   "written_files": [
-    "conf/scripts/bot_1-run-001.yml",
+    "conf/scripts/warmbot_1-run-001.yml",
     "conf/controllers/usdc-usdt-recurring-buy.yml"
   ]
 }
@@ -712,12 +712,12 @@ A deployment should use request/response IDs so the API can distinguish "command
 Example high-level sequence:
 
 ```text
-API -> hbot/bot_1/import_strategy
-bot_1 -> hummingbot-api/response/<request_id>
+API -> hbot/warmbot_1/import_strategy
+warmbot_1 -> hummingbot-api/response/<request_id>
 
-API -> hbot/bot_1/start
-bot_1 -> hbot/bot_1/status_updates
-bot_1 -> hummingbot-api/response/<request_id>
+API -> hbot/warmbot_1/start
+warmbot_1 -> hbot/warmbot_1/status_updates
+warmbot_1 -> hummingbot-api/response/<request_id>
 ```
 
 Expected status updates:
@@ -835,7 +835,7 @@ Tradeoffs:
 
 The intended future pool flow is:
 
-1. Start `bot_1`, `bot_2`, and `bot_3` as idle headless bots.
+1. Start `warmbot_1`, `warmbot_2`, and `warmbot_3` as idle headless bots.
 2. Each bot connects to MQTT and publishes lifecycle status.
 3. The API discovers connected idle bots.
 4. A deployment request selects an idle bot instead of creating a new container.

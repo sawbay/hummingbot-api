@@ -29,8 +29,8 @@ services:
   rs-orchestrator:
     container_name: rs-orchestrator
     image: ghcr.io/sawbay/rs-orchestrator:latest
-    # build:
-    #   context: ./rs-orchestrator
+    build:
+      context: ./rs-orchestrator
     ports:
       - "8001:8001"
     volumes:

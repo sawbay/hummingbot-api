@@ -59,6 +59,54 @@ pub struct V2ControllerDeployment {
     pub headless: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct OrchestrationRequest {
+    pub request_id: String,
+    pub instance_name: String,
+    pub strategy_type: String,
+    pub strategy_name: String,
+    pub credentials_profile: String,
+    pub script_config: Option<String>,
+    #[serde(default)]
+    pub controllers_config: Vec<String>,
+    pub r2: OrchestrationR2,
+    pub deployment_config: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct OrchestrationR2 {
+    pub prefix: String,
+    pub keys: OrchestrationR2Keys,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct OrchestrationR2Keys {
+    pub credential_profile: String,
+    pub script_config: Option<String>,
+    #[serde(default)]
+    pub controllers: Vec<String>,
+    pub scripts_runtime: Option<String>,
+    pub controllers_runtime: Option<String>,
+}
+
+impl OrchestrationR2Keys {
+    pub fn flatten(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        keys.push(self.credential_profile.clone());
+        if let Some(script_config) = &self.script_config {
+            keys.push(script_config.clone());
+        }
+        keys.extend(self.controllers.clone());
+        if let Some(scripts_runtime) = &self.scripts_runtime {
+            keys.push(scripts_runtime.clone());
+        }
+        if let Some(controllers_runtime) = &self.controllers_runtime {
+            keys.push(controllers_runtime.clone());
+        }
+        keys
+    }
+}
+
 fn default_image() -> String {
     "hummingbot/hummingbot:latest".to_string()
 }

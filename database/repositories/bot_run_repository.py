@@ -89,6 +89,57 @@ class BotRunRepository:
 
         return bot_run
 
+    async def update_orchestration_running(
+        self,
+        instance_name: str,
+        runtime_bot_name: Optional[str] = None,
+    ) -> Optional["BotRun"]:
+        """Mark a queued orchestration run as RUNNING using its deployment instance name."""
+        stmt = select(BotRun).where(
+            and_(
+                BotRun.instance_name == instance_name,
+                BotRun.run_status == "CREATED"
+            )
+        ).order_by(desc(BotRun.deployed_at))
+
+        result = await self.session.execute(stmt)
+        bot_run = result.scalar_one_or_none()
+
+        if bot_run:
+            if runtime_bot_name:
+                bot_run.bot_name = runtime_bot_name
+            bot_run.run_status = "RUNNING"
+            await self.session.flush()
+            await self.session.refresh(bot_run)
+
+        return bot_run
+
+    async def update_orchestration_failed(
+        self,
+        instance_name: str,
+        error_message: str,
+    ) -> Optional["BotRun"]:
+        """Mark a queued orchestration run as failed using its deployment instance name."""
+        stmt = select(BotRun).where(
+            and_(
+                BotRun.instance_name == instance_name,
+                or_(BotRun.run_status == "CREATED", BotRun.run_status == "RUNNING")
+            )
+        ).order_by(desc(BotRun.deployed_at))
+
+        result = await self.session.execute(stmt)
+        bot_run = result.scalar_one_or_none()
+
+        if bot_run:
+            bot_run.run_status = "ERROR"
+            bot_run.deployment_status = "FAILED"
+            bot_run.stopped_at = datetime.now(timezone.utc)
+            bot_run.error_message = error_message
+            await self.session.flush()
+            await self.session.refresh(bot_run)
+
+        return bot_run
+
     async def update_bot_run_failed(
         self,
         bot_name: str,
@@ -122,7 +173,10 @@ class BotRunRepository:
     async def update_bot_run_archived(self, bot_name: str) -> Optional["BotRun"]:
         """Mark a bot run as archived."""
         stmt = select(BotRun).where(
-            BotRun.bot_name == bot_name
+            or_(
+                BotRun.bot_name == bot_name,
+                BotRun.instance_name == bot_name,
+            )
         ).order_by(desc(BotRun.deployed_at))
         
         result = await self.session.execute(stmt)

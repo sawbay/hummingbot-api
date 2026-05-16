@@ -1,15 +1,15 @@
 services:
-  bot-pool-01:
+  warmbot-01:
     image: ${HUMMINGBOT_IMAGE:-ghcr.io/sawbay/hummingbot:custom}
-    container_name: bot_1
+    container_name: warmbot_1
     restart: unless-stopped
     network_mode: host
     env_file:
       - .env
     volumes:
-      - ./bots/pools/bot_1/conf:/home/hummingbot/conf:rw
-      - ./bots/pools/bot_1/data:/home/hummingbot/data:rw
-      - ./bots/pools/bot_1/logs:/home/hummingbot/logs:rw
+      - ./bots/pools/warmbot_1/conf:/home/hummingbot/conf:rw
+      - ./bots/pools/warmbot_1/data:/home/hummingbot/data:rw
+      - ./bots/pools/warmbot_1/logs:/home/hummingbot/logs:rw
       - ./bots/scripts:/home/hummingbot/scripts:rw
       - ./bots/controllers:/home/hummingbot/controllers:rw
     logging:
@@ -18,36 +18,36 @@ services:
         max-size: 10m
         max-file: "5"
 
-  # bot-pool-02:
-  #   image: ${HUMMINGBOT_IMAGE:-ghcr.io/sawbay/hummingbot:custom}
-  #   container_name: bot_2
-  #   restart: unless-stopped
-  #   network_mode: host
-  #   env_file:
-  #     - .env
-  #   volumes:
-  #     - ./bots/pools/bot_2/conf:/home/hummingbot/conf:rw
-  #     - ./bots/pools/bot_2/data:/home/hummingbot/data:rw
-  #     - ./bots/pools/bot_2/logs:/home/hummingbot/logs:rw
-  #     - ./bots/scripts:/home/hummingbot/scripts:rw
-  #     - ./bots/controllers:/home/hummingbot/controllers:rw
-  #   logging:
-  #     driver: json-file
-  #     options:
-  #       max-size: 10m
-  #       max-file: "5"
+  warmbot-02:
+    image: ${HUMMINGBOT_IMAGE:-ghcr.io/sawbay/hummingbot:custom}
+    container_name: warmbot_2
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./bots/pools/warmbot_2/conf:/home/hummingbot/conf:rw
+      - ./bots/pools/warmbot_2/data:/home/hummingbot/data:rw
+      - ./bots/pools/warmbot_2/logs:/home/hummingbot/logs:rw
+      - ./bots/scripts:/home/hummingbot/scripts:rw
+      - ./bots/controllers:/home/hummingbot/controllers:rw
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
 
-  # bot-pool-03:
+  # warmbot-03:
   #   image: ${HUMMINGBOT_IMAGE:-ghcr.io/sawbay/hummingbot:custom}
-  #   container_name: bot_3
+  #   container_name: warmbot_3
   #   restart: unless-stopped
   #   network_mode: host
   #   env_file:
   #     - .env
   #   volumes:
-  #     - ./bots/pools/bot_3/conf:/home/hummingbot/conf:rw
-  #     - ./bots/pools/bot_3/data:/home/hummingbot/data:rw
-  #     - ./bots/pools/bot_3/logs:/home/hummingbot/logs:rw
+  #     - ./bots/pools/warmbot_3/conf:/home/hummingbot/conf:rw
+  #     - ./bots/pools/warmbot_3/data:/home/hummingbot/data:rw
+  #     - ./bots/pools/warmbot_3/logs:/home/hummingbot/logs:rw
   #     - ./bots/scripts:/home/hummingbot/scripts:rw
   #     - ./bots/controllers:/home/hummingbot/controllers:rw
   #   logging:

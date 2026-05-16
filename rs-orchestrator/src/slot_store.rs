@@ -18,16 +18,16 @@ mod tests {
 
     #[tokio::test]
     async fn reserves_only_one_idle_slot() {
-        let store = SlotStore::new(vec!["bot_1".to_string()]);
-        store.mark_status("bot_1", SlotStatus::Idle).await;
+        let store = SlotStore::new(vec!["warmbot_1".to_string()]);
+        store.mark_status("warmbot_1", SlotStatus::Idle).await;
 
         let first = store.reserve_idle().await;
         let second = store.reserve_idle().await;
 
-        assert_eq!(first.unwrap().bot_name, "bot_1");
+        assert_eq!(first.unwrap().bot_name, "warmbot_1");
         assert!(second.is_none());
         assert_eq!(
-            store.get("bot_1").await.unwrap().status,
+            store.get("warmbot_1").await.unwrap().status,
             SlotStatus::Reserved
         );
     }
@@ -142,6 +142,44 @@ impl SlotStore {
             slot.assigned_run_id = Some(run_id);
             slot.account_name = Some(account_name);
             slot.current_config_name = Some(config_name);
+            slot.current_controller_ids = controllers;
+            slot.last_error = None;
+            slot.updated_at = Utc::now();
+        }
+    }
+
+    pub async fn assign_configuring_without_run(
+        &self,
+        bot_name: &str,
+        account_name: String,
+        config_name: Option<String>,
+        controllers: Vec<String>,
+    ) {
+        let mut guard = self.inner.lock().await;
+        if let Some(slot) = guard.get_mut(bot_name) {
+            slot.status = SlotStatus::Configuring;
+            slot.assigned_run_id = None;
+            slot.account_name = Some(account_name);
+            slot.current_config_name = config_name;
+            slot.current_controller_ids = controllers;
+            slot.last_error = None;
+            slot.updated_at = Utc::now();
+        }
+    }
+
+    pub async fn assign_running_without_run(
+        &self,
+        bot_name: &str,
+        account_name: String,
+        config_name: Option<String>,
+        controllers: Vec<String>,
+    ) {
+        let mut guard = self.inner.lock().await;
+        if let Some(slot) = guard.get_mut(bot_name) {
+            slot.status = SlotStatus::Running;
+            slot.assigned_run_id = None;
+            slot.account_name = Some(account_name);
+            slot.current_config_name = config_name;
             slot.current_controller_ids = controllers;
             slot.last_error = None;
             slot.updated_at = Utc::now();

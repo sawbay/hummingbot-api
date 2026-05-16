@@ -5,6 +5,7 @@ mod error;
 mod fs_ops;
 mod mqtt;
 mod orchestrator;
+mod r2;
 mod routes;
 mod slot_store;
 mod types;
@@ -23,6 +24,7 @@ use crate::db::Db;
 use crate::docker::DockerClient;
 use crate::mqtt::MqttBus;
 use crate::orchestrator::Orchestrator;
+use crate::r2::R2Client;
 use crate::slot_store::SlotStore;
 
 #[tokio::main]
@@ -43,13 +45,23 @@ async fn main() -> anyhow::Result<()> {
     slots.rebuild_from_db(&db).await;
 
     let docker = DockerClient::new();
+    let r2 = R2Client::from_settings(&settings)
+        .await
+        .context("initialize r2")?;
     let mqtt = Arc::new(
         MqttBus::connect(settings.clone(), slots.clone())
             .await
             .context("connect mqtt")?,
     );
 
-    let orchestrator = Arc::new(Orchestrator::new(settings.clone(), db, slots, mqtt, docker));
+    let orchestrator = Arc::new(Orchestrator::new(
+        settings.clone(),
+        db,
+        slots,
+        mqtt,
+        docker,
+        r2,
+    ));
 
     let app: Router = routes::router(orchestrator).layer(TraceLayer::new_for_http());
     let addr = SocketAddr::from(([0, 0, 0, 0], settings.port));

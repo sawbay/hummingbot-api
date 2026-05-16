@@ -256,6 +256,7 @@ async def lifespan(app: FastAPI):
         broker_ssl=settings.broker.ssl,
         event_bus=event_bus,
     )
+    bots_orchestrator.configure_orchestration_status_handler(db_manager)
 
     backtesting_service = BacktestingService()
     docker_service = DockerService()

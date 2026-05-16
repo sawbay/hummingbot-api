@@ -45,8 +45,8 @@ def test_r2_key_mapping_allows_only_durable_prefixes(tmp_path):
         "bots/credentials/master_account/conf_client.yml"
     )
     assert service.key_for_path("conf/controllers/foo.yml") == "bots/conf/controllers/foo.yml"
-    assert service.key_for_path("instances/bot_1/conf/conf_client.yml") is None
-    assert service.key_for_path("pools/bot_1/conf/conf_client.yml") is None
+    assert service.key_for_path("instances/warmbot_1/conf/conf_client.yml") is None
+    assert service.key_for_path("pools/warmbot_1/conf/conf_client.yml") is None
     assert service.key_for_path("logs/logs_hummingbot.log") is None
 
 
@@ -68,7 +68,7 @@ def test_file_system_write_through_uploads_durable_files_only(tmp_path):
     fs_util.set_storage_service(service)
 
     fs_util.add_file("conf/controllers", "durable.yml", "a: 1", override=True)
-    fs_util.add_file("instances/bot_1/conf", "runtime.yml", "a: 1", override=True)
+    fs_util.add_file("instances/warmbot_1/conf", "runtime.yml", "a: 1", override=True)
 
     assert len(client.uploads) == 1
     assert client.uploads[0][2] == "bots/conf/controllers/durable.yml"

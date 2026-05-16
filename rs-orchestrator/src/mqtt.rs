@@ -17,6 +17,7 @@ pub struct MqttBus {
     client: AsyncClient,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
     status_tx: broadcast::Sender<StatusEvent>,
+    orchestrate_tx: broadcast::Sender<Value>,
     logs: Arc<Mutex<HashMap<String, VecDeque<Value>>>>,
 }
 
@@ -39,10 +40,12 @@ impl MqttBus {
 
         let (client, event_loop) = AsyncClient::new(options, 100);
         let (status_tx, _) = broadcast::channel(256);
+        let (orchestrate_tx, _) = broadcast::channel(256);
         let bus = Self {
             client,
             pending: Arc::new(Mutex::new(HashMap::new())),
             status_tx,
+            orchestrate_tx,
             logs: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -59,6 +62,7 @@ impl MqttBus {
             "hbot/+/notify",
             "hbot/+/performance",
             "hummingbot-api/response/+",
+            "hbot/orchestrate",
         ] {
             self.client.subscribe(topic, QoS::AtLeastOnce).await?;
         }
@@ -71,6 +75,10 @@ impl MqttBus {
 
     pub fn subscribe_status(&self) -> broadcast::Receiver<StatusEvent> {
         self.status_tx.subscribe()
+    }
+
+    pub fn subscribe_orchestrate(&self) -> broadcast::Receiver<Value> {
+        self.orchestrate_tx.subscribe()
     }
 
     pub async fn recent_logs(&self, bot_name: &str) -> Vec<Value> {
@@ -111,6 +119,13 @@ impl MqttBus {
                 false,
                 serde_json::to_vec(&message)?,
             )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn publish_raw(&self, topic: &str, data: Value) -> anyhow::Result<()> {
+        self.client
+            .publish(topic, QoS::AtLeastOnce, false, serde_json::to_vec(&data)?)
             .await?;
         Ok(())
     }
@@ -197,6 +212,7 @@ impl MqttBus {
     fn spawn_event_loop(&self, mut event_loop: EventLoop, slots: SlotStore) {
         let pending = self.pending.clone();
         let status_tx = self.status_tx.clone();
+        let orchestrate_tx = self.orchestrate_tx.clone();
         let logs = self.logs.clone();
 
         tokio::spawn(async move {
@@ -208,6 +224,7 @@ impl MqttBus {
                             packet.payload.to_vec(),
                             &pending,
                             &status_tx,
+                            &orchestrate_tx,
                             &logs,
                             &slots,
                         )
@@ -229,10 +246,16 @@ async fn handle_publish(
     payload: Vec<u8>,
     pending: &Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
     status_tx: &broadcast::Sender<StatusEvent>,
+    orchestrate_tx: &broadcast::Sender<Value>,
     logs: &Arc<Mutex<HashMap<String, VecDeque<Value>>>>,
     slots: &SlotStore,
 ) {
     let value = parse_payload(&payload);
+
+    if topic == "hbot/orchestrate" {
+        let _ = orchestrate_tx.send(value);
+        return;
+    }
 
     if topic.starts_with("hummingbot-api/response/") {
         if let Some(tx) = pending.lock().await.remove(&topic) {

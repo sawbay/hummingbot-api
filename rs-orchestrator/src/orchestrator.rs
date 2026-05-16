@@ -10,10 +10,11 @@ use crate::docker::{ContainerHealth, DockerClient};
 use crate::error::{AppError, AppResult};
 use crate::fs_ops;
 use crate::mqtt::MqttBus;
+use crate::r2::R2Client;
 use crate::slot_store::SlotStore;
 use crate::types::{
-    ApiResponse, BotRunRow, DeployResponse, SlotState, SlotStatus, StopBotAction,
-    V2ControllerDeployment,
+    ApiResponse, BotRunRow, DeployResponse, OrchestrationRequest, SlotState, SlotStatus,
+    StopBotAction, V2ControllerDeployment,
 };
 
 #[derive(Clone)]
@@ -23,6 +24,7 @@ pub struct Orchestrator {
     slots: SlotStore,
     mqtt: Arc<MqttBus>,
     docker: DockerClient,
+    r2: R2Client,
 }
 
 impl Orchestrator {
@@ -32,6 +34,7 @@ impl Orchestrator {
         slots: SlotStore,
         mqtt: Arc<MqttBus>,
         docker: DockerClient,
+        r2: R2Client,
     ) -> Self {
         let this = Self {
             settings,
@@ -39,8 +42,10 @@ impl Orchestrator {
             slots,
             mqtt,
             docker,
+            r2,
         };
         this.spawn_heartbeat_reaper();
+        this.spawn_orchestration_listener();
         this
     }
 
@@ -126,7 +131,15 @@ impl Orchestrator {
             )
             .await;
 
-        if let Err(err) = self.import_and_start(bot_name, &script_config_name).await {
+        if let Err(err) = self
+            .import_and_start(
+                bot_name,
+                "v2_with_controllers",
+                "v2_with_controllers.py",
+                Some(&script_config_name),
+            )
+            .await
+        {
             let logs = self.failure_diagnostics(bot_name, err.to_string()).await;
             let _ = self.db.mark_failed(bot_name, &logs).await;
             self.slots.mark_error(bot_name, logs.clone()).await;
@@ -160,13 +173,17 @@ impl Orchestrator {
     async fn import_and_start(
         &self,
         bot_name: &str,
-        script_config_name: &str,
+        strategy_name: &str,
+        script_file_name: &str,
+        script_config_name: Option<&str>,
     ) -> anyhow::Result<()> {
-        let import_payload = json!({
-            "strategy": "v2_with_controllers",
-            "script": "v2_with_controllers.py",
-            "conf": script_config_name,
+        let mut import_payload = json!({
+            "strategy": strategy_name,
+            "script": script_file_name,
         });
+        if let Some(script_config_name) = script_config_name {
+            import_payload["conf"] = json!(script_config_name);
+        }
         let _ = self
             .mqtt
             .publish_command_and_wait(
@@ -177,13 +194,15 @@ impl Orchestrator {
             )
             .await?;
 
-        let start_payload = json!({
+        let mut start_payload = json!({
             "log_level": "INFO",
-            "script": "v2_with_controllers.py",
-            "conf": script_config_name,
+            "script": script_file_name,
             "is_quickstart": true,
             "async_backend": true,
         });
+        if let Some(script_config_name) = script_config_name {
+            start_payload["conf"] = json!(script_config_name);
+        }
         self.mqtt
             .publish_command(bot_name, "start", start_payload)
             .await?;
@@ -197,6 +216,133 @@ impl Orchestrator {
             Some(event) => anyhow::bail!("strategy failed while starting: {}", event.payload),
             None => anyhow::bail!("timed out waiting for strategy running status"),
         }
+    }
+
+    async fn handle_orchestration_request(&self, request: OrchestrationRequest) {
+        if let Err(err) = self
+            .deploy_from_orchestration_request(request.clone())
+            .await
+        {
+            tracing::error!("orchestration request {} failed: {err}", request.request_id);
+            let _ = self
+                .publish_orchestration_status(&request, None, "failed", Some(err.to_string()))
+                .await;
+        }
+    }
+
+    async fn deploy_from_orchestration_request(
+        &self,
+        request: OrchestrationRequest,
+    ) -> AppResult<()> {
+        let slot = self.slots.reserve_idle().await.ok_or_else(|| {
+            AppError::Conflict("No idle warm-pool slots are available".to_string())
+        })?;
+        self.publish_orchestration_status(&request, Some(&slot.bot_name), "reserved", None)
+            .await
+            .map_err(|err| AppError::Internal(err.into()))?;
+
+        self.publish_orchestration_status(&request, Some(&slot.bot_name), "hydrating", None)
+            .await
+            .map_err(|err| AppError::Internal(err.into()))?;
+
+        let keys = request.r2.keys.flatten();
+        if let Err(err) = self.r2.hydrate_keys(&keys).await {
+            let error = err.to_string();
+            self.slots.mark_error(&slot.bot_name, error.clone()).await;
+            let _ = self
+                .publish_orchestration_status(&request, Some(&slot.bot_name), "failed", Some(error))
+                .await;
+            return Ok(());
+        }
+
+        let files = match fs_ops::prepare_existing_deployment(
+            &self.settings.bots_path,
+            &slot.bot_name,
+            request.script_config.as_deref(),
+            &request.controllers_config,
+            &request.credentials_profile,
+        )
+        .await
+        {
+            Ok(files) => files,
+            Err(err) => {
+                let error = err.to_string();
+                self.slots.mark_error(&slot.bot_name, error.clone()).await;
+                let _ = self
+                    .publish_orchestration_status(
+                        &request,
+                        Some(&slot.bot_name),
+                        "failed",
+                        Some(error),
+                    )
+                    .await;
+                return Ok(());
+            }
+        };
+
+        self.slots
+            .assign_configuring_without_run(
+                &slot.bot_name,
+                request.credentials_profile.clone(),
+                request.script_config.clone(),
+                files.controllers.clone(),
+            )
+            .await;
+        self.publish_orchestration_status(&request, Some(&slot.bot_name), "configuring", None)
+            .await
+            .map_err(|err| AppError::Internal(err.into()))?;
+
+        let script_file_name = script_file_name_for_request(&request);
+        if let Err(err) = self
+            .import_and_start(
+                &slot.bot_name,
+                &request.strategy_name,
+                &script_file_name,
+                request.script_config.as_deref(),
+            )
+            .await
+        {
+            let error = err.to_string();
+            self.slots.mark_error(&slot.bot_name, error.clone()).await;
+            let _ = self
+                .publish_orchestration_status(&request, Some(&slot.bot_name), "failed", Some(error))
+                .await;
+            return Ok(());
+        }
+
+        self.slots
+            .assign_running_without_run(
+                &slot.bot_name,
+                request.credentials_profile.clone(),
+                request.script_config.clone(),
+                files.controllers,
+            )
+            .await;
+        self.publish_orchestration_status(&request, Some(&slot.bot_name), "running", None)
+            .await
+            .map_err(|err| AppError::Internal(err.into()))?;
+        Ok(())
+    }
+
+    async fn publish_orchestration_status(
+        &self,
+        request: &OrchestrationRequest,
+        bot_name: Option<&str>,
+        status: &str,
+        error: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.mqtt
+            .publish_raw(
+                "hbot/orchestrate/status",
+                json!({
+                    "request_id": request.request_id,
+                    "instance_name": request.instance_name,
+                    "bot_name": bot_name,
+                    "status": status,
+                    "error": error,
+                }),
+            )
+            .await
     }
 
     async fn failure_diagnostics(&self, bot_name: &str, error: String) -> String {
@@ -317,6 +463,37 @@ impl Orchestrator {
                 slots.mark_stale_offline(timeout).await;
             }
         });
+    }
+
+    fn spawn_orchestration_listener(&self) {
+        let mut rx = self.mqtt.subscribe_orchestrate();
+        let this = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(payload) => match serde_json::from_value::<OrchestrationRequest>(payload) {
+                        Ok(request) => {
+                            let worker = this.clone();
+                            tokio::spawn(async move {
+                                worker.handle_orchestration_request(request).await;
+                            });
+                        }
+                        Err(err) => tracing::warn!("invalid hbot/orchestrate payload: {err}"),
+                    },
+                    Err(err) => tracing::warn!("orchestration subscription error: {err}"),
+                }
+            }
+        });
+    }
+}
+
+fn script_file_name_for_request(request: &OrchestrationRequest) -> String {
+    if request.strategy_type == "controller" {
+        "v2_with_controllers.py".to_string()
+    } else if request.strategy_name.ends_with(".py") {
+        request.strategy_name.clone()
+    } else {
+        format!("{}.py", request.strategy_name)
     }
 }
 

@@ -16,6 +16,12 @@ pub struct Settings {
     pub pool_bots: Vec<String>,
     pub command_timeout_secs: u64,
     pub heartbeat_timeout_secs: u64,
+    pub r2_enabled: bool,
+    pub r2_bucket: String,
+    pub r2_endpoint_url: String,
+    pub r2_access_key_id: String,
+    pub r2_secret_access_key: String,
+    pub r2_prefix: String,
 }
 
 impl Settings {
@@ -39,6 +45,12 @@ impl Settings {
             pool_bots: parse_pool_bots(),
             command_timeout_secs: env_parse("COMMAND_TIMEOUT_SECS", 30),
             heartbeat_timeout_secs: env_parse("HEARTBEAT_TIMEOUT_SECS", 30),
+            r2_enabled: env_parse("R2_ENABLED", false),
+            r2_bucket: std::env::var("R2_BUCKET").unwrap_or_default(),
+            r2_endpoint_url: std::env::var("R2_ENDPOINT_URL").unwrap_or_default(),
+            r2_access_key_id: std::env::var("R2_ACCESS_KEY_ID").unwrap_or_default(),
+            r2_secret_access_key: std::env::var("R2_SECRET_ACCESS_KEY").unwrap_or_default(),
+            r2_prefix: std::env::var("R2_PREFIX").unwrap_or_else(|_| "bots".to_string()),
         })
     }
 
@@ -63,7 +75,7 @@ where
 
 fn parse_pool_bots() -> Vec<String> {
     std::env::var("POOL_BOTS")
-        .unwrap_or_else(|_| "bot_1,bot_2,bot_3".to_string())
+        .unwrap_or_else(|_| "warmbot_1,warmbot_2,warmbot_3".to_string())
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())

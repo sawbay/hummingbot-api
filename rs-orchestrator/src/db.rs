@@ -20,9 +20,9 @@ impl Db {
         Ok(Self {
             pool,
             slot_names: vec![
-                "bot_1".to_string(),
-                "bot_2".to_string(),
-                "bot_3".to_string(),
+                "warmbot_1".to_string(),
+                "warmbot_2".to_string(),
+                "warmbot_3".to_string(),
             ],
         })
     }
