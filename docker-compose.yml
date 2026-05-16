@@ -1,7 +1,7 @@
 services:
   hummingbot-api:
     container_name: hummingbot-api
-    image: ghcr.io/sawbay/hummingbot-api:latest
+    image: ghcr.io/sawbay/hummingbot-api-custom:latest
     build:
         context: .
     ports:
