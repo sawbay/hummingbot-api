@@ -39,6 +39,8 @@ Error example when no strategy is running:
 
 From `/status`, you can know whether the bot has an active strategy, and if it does, the strategy's formatted runtime status. The exact contents depend on the strategy's `format_status()` implementation, but typically include markets/connectors, balances, active orders, executor/controller state for Strategy V2, performance, and warnings.
 
+`rs-orchestrator` uses the synchronous `/status` RPC content to confirm strategy state after start/stop commands. A `200` response with non-empty status text is treated as a running strategy. A response whose `msg` contains `No strategy is currently running` is treated as stopped.
+
 From `/status_updates`, you can know bridge lifecycle/availability only: whether the MQTT bridge came online/offline and any lifecycle messages published by the app. It is not a full bot-state snapshot.
 
 From `/notify`, you receive CLI-style notification output, including async status output if `/status` is called with `async_backend: true`.

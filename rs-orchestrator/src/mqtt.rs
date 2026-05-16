@@ -2,23 +2,28 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Context;
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS, Transport};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot, Mutex};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout, Instant};
 
 use crate::config::Settings;
 use crate::slot_store::SlotStore;
-use crate::types::{SlotStatus, StatusEvent};
+use crate::types::SlotStatus;
 
 pub const ORCHESTRATE_DEPLOY_TOPIC: &str = "orchestrate/deploy";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrategyContentState {
+    Running,
+    Stopped,
+    Unknown,
+}
 
 #[derive(Clone)]
 pub struct MqttBus {
     client: AsyncClient,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
-    status_tx: broadcast::Sender<StatusEvent>,
     orchestrate_tx: broadcast::Sender<Value>,
     logs: Arc<Mutex<HashMap<String, VecDeque<Value>>>>,
 }
@@ -41,12 +46,10 @@ impl MqttBus {
         }
 
         let (client, event_loop) = AsyncClient::new(options, 100);
-        let (status_tx, _) = broadcast::channel(256);
         let (orchestrate_tx, _) = broadcast::channel(256);
         let bus = Self {
             client,
             pending: Arc::new(Mutex::new(HashMap::new())),
-            status_tx,
             orchestrate_tx,
             logs: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -73,10 +76,6 @@ impl MqttBus {
 
     pub fn is_connected(&self) -> bool {
         true
-    }
-
-    pub fn subscribe_status(&self) -> broadcast::Receiver<StatusEvent> {
-        self.status_tx.subscribe()
     }
 
     pub fn subscribe_orchestrate(&self) -> broadcast::Receiver<Value> {
@@ -140,7 +139,6 @@ impl MqttBus {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub async fn publish_command_and_wait(
         &self,
         bot_name: &str,
@@ -194,41 +192,49 @@ impl MqttBus {
         }
     }
 
-    pub async fn wait_for_strategy_status(
+    pub async fn wait_for_strategy_status_content(
         &self,
         bot_name: &str,
-        expected: &str,
+        expected: StrategyContentState,
         wait: Duration,
-    ) -> anyhow::Result<Option<StatusEvent>> {
-        let mut rx = self.subscribe_status();
-        let bot_name = bot_name.to_string();
-        let expected = expected.to_string();
-        let fut = async move {
-            loop {
-                let event = rx.recv().await.context("status channel closed")?;
-                if event.bot_name == bot_name
-                    && event.kind.as_deref() == Some("strategy")
-                    && event.msg.as_deref() == Some(expected.as_str())
-                {
-                    return Ok::<_, anyhow::Error>(event);
-                }
-                if event.bot_name == bot_name
-                    && event.kind.as_deref() == Some("strategy")
-                    && event.msg.as_deref() == Some("failed")
-                {
-                    return Ok(event);
+    ) -> anyhow::Result<Option<Value>> {
+        let deadline = Instant::now() + wait;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+
+            let response = self
+                .publish_command_and_wait(
+                    bot_name,
+                    "status",
+                    json!({"async_backend": false}),
+                    remaining.min(Duration::from_secs(5)),
+                )
+                .await?;
+
+            if let Some(response) = response {
+                let state = classify_strategy_status_response(&response);
+                tracing::debug!(
+                    bot_name = %bot_name,
+                    expected = ?expected,
+                    observed = ?state,
+                    payload = %response,
+                    "polled strategy status content"
+                );
+                if state == expected {
+                    return Ok(Some(response));
                 }
             }
-        };
-        match timeout(wait, fut).await {
-            Ok(result) => result.map(Some),
-            Err(_) => Ok(None),
+
+            sleep(remaining.min(Duration::from_secs(1))).await;
         }
     }
 
     fn spawn_event_loop(&self, mut event_loop: EventLoop, slots: SlotStore) {
         let pending = self.pending.clone();
-        let status_tx = self.status_tx.clone();
         let orchestrate_tx = self.orchestrate_tx.clone();
         let logs = self.logs.clone();
 
@@ -240,7 +246,6 @@ impl MqttBus {
                             packet.topic,
                             packet.payload.to_vec(),
                             &pending,
-                            &status_tx,
                             &orchestrate_tx,
                             &logs,
                             &slots,
@@ -262,7 +267,6 @@ async fn handle_publish(
     topic: String,
     payload: Vec<u8>,
     pending: &Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
-    status_tx: &broadcast::Sender<StatusEvent>,
     orchestrate_tx: &broadcast::Sender<Value>,
     logs: &Arc<Mutex<HashMap<String, VecDeque<Value>>>>,
     slots: &SlotStore,
@@ -316,12 +320,6 @@ async fn handle_publish(
             } else if kind.as_deref() == Some("strategy") && msg.as_deref() == Some("failed") {
                 slots.mark_error(&bot_name, value.to_string()).await;
             }
-            let _ = status_tx.send(StatusEvent {
-                bot_name,
-                kind,
-                msg,
-                payload: value,
-            });
         }
         "log" => {
             let mut guard = logs.lock().await;
@@ -342,6 +340,31 @@ fn parse_payload(payload: &[u8]) -> Value {
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(payload).to_string()))
 }
 
+fn classify_strategy_status_response(value: &Value) -> StrategyContentState {
+    let status = response_field(value, "status").and_then(Value::as_i64);
+    let msg = response_field(value, "msg")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let normalized_msg = msg.to_ascii_lowercase();
+
+    if normalized_msg.contains("no strategy is currently running") {
+        return StrategyContentState::Stopped;
+    }
+
+    if status == Some(200) && !msg.is_empty() {
+        return StrategyContentState::Running;
+    }
+
+    StrategyContentState::Unknown
+}
+
+fn response_field<'a>(value: &'a Value, field: &str) -> Option<&'a Value> {
+    value
+        .get(field)
+        .or_else(|| value.get("data").and_then(|data| data.get(field)))
+}
+
 fn millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -351,10 +374,55 @@ fn millis() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_payload;
+    use serde_json::json;
+
+    use super::{classify_strategy_status_response, parse_payload, StrategyContentState};
 
     #[test]
     fn parses_plain_string_payload() {
         assert_eq!(parse_payload(b"hello").as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn classifies_status_content_as_running() {
+        let response = json!({
+            "status": 200,
+            "msg": "Markets:\n  exchange: binance",
+            "data": ""
+        });
+
+        assert_eq!(
+            classify_strategy_status_response(&response),
+            StrategyContentState::Running
+        );
+    }
+
+    #[test]
+    fn classifies_status_content_as_stopped() {
+        let response = json!({
+            "status": 400,
+            "msg": "No strategy is currently running!",
+            "data": ""
+        });
+
+        assert_eq!(
+            classify_strategy_status_response(&response),
+            StrategyContentState::Stopped
+        );
+    }
+
+    #[test]
+    fn classifies_nested_status_content() {
+        let response = json!({
+            "data": {
+                "status": 200,
+                "msg": "Strategy status"
+            }
+        });
+
+        assert_eq!(
+            classify_strategy_status_response(&response),
+            StrategyContentState::Running
+        );
     }
 }

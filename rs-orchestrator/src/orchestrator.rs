@@ -8,7 +8,7 @@ use crate::config::Settings;
 use crate::docker::{ContainerHealth, DockerClient};
 use crate::error::{AppError, AppResult};
 use crate::fs_ops;
-use crate::mqtt::MqttBus;
+use crate::mqtt::{MqttBus, StrategyContentState};
 use crate::r2::R2Client;
 use crate::slot_store::SlotStore;
 use crate::types::{
@@ -173,12 +173,15 @@ impl Orchestrator {
 
         match self
             .mqtt
-            .wait_for_strategy_status(bot_name, "running", self.settings.command_timeout())
+            .wait_for_strategy_status_content(
+                bot_name,
+                StrategyContentState::Running,
+                self.settings.command_timeout(),
+            )
             .await?
         {
-            Some(event) if event.msg.as_deref() == Some("running") => Ok(()),
-            Some(event) => anyhow::bail!("strategy failed while starting: {}", event.payload),
-            None => anyhow::bail!("timed out waiting for strategy running status"),
+            Some(_) => Ok(()),
+            None => anyhow::bail!("timed out waiting for /status content to show running strategy"),
         }
     }
 
@@ -381,22 +384,26 @@ impl Orchestrator {
 
         let stopped = self
             .mqtt
-            .wait_for_strategy_status(&action.bot_name, "stopped", self.settings.command_timeout())
+            .wait_for_strategy_status_content(
+                &action.bot_name,
+                StrategyContentState::Stopped,
+                self.settings.command_timeout(),
+            )
             .await
             .map_err(|err| AppError::ServiceUnavailable(err.to_string()))?;
 
         if stopped.is_none() {
             tracing::warn!(
-                "timed out waiting for stopped status from {}",
+                "timed out waiting for /status content to show stopped strategy from {}",
                 action.bot_name
             );
         }
 
-        if let Some(event) = stopped {
+        if let Some(response) = stopped {
             tracing::info!(
                 bot_name = %action.bot_name,
-                payload = %event.payload,
-                "received stopped status"
+                payload = %response,
+                "received stopped strategy status content"
             );
         }
 

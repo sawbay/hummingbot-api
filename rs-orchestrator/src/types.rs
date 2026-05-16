@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -140,12 +139,4 @@ pub struct ApiResponse<T: Serialize> {
 pub struct DeploymentFiles {
     pub script_config_name: String,
     pub controllers: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct StatusEvent {
-    pub bot_name: String,
-    pub kind: Option<String>,
-    pub msg: Option<String>,
-    pub payload: Value,
 }
